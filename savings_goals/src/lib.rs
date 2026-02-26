@@ -522,6 +522,14 @@ impl SavingsGoalContract {
     // Core goal operations
     // -----------------------------------------------------------------------
 
+    /// Creates a new savings goal.
+    ///
+    /// - `owner` must authorize the call.
+    /// - `target_amount` must be positive.
+    /// - `target_date` is stored as provided and may be in the past. This
+    ///   supports backfill or migration use cases where historical goals are
+    ///   recorded after the fact. Callers that need strictly future-dated
+    ///   goals should validate this before invoking the contract.
     pub fn create_goal(
         env: Env,
         owner: Address,

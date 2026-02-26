@@ -25,6 +25,31 @@ fn test_create_goal_unique_ids_succeeds() {
     assert_ne!(id1, id2);
 }
 
+/// Documented behavior: past target dates are allowed (e.g. for backfill or
+/// data migration). This test locks in that create_goal accepts a target_date
+/// earlier than the current ledger timestamp and persists it as provided.
+#[test]
+fn test_create_goal_allows_past_target_date() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, SavingsGoalContract);
+    let client = SavingsGoalContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    client.init();
+    env.mock_all_auths();
+
+    // Move ledger time forward so our target_date is clearly in the past.
+    set_time(&env, 2_000_000_000);
+    let past_target_date = 1_000_000_000u64;
+
+    let name = String::from_str(&env, "Backfill Goal");
+    let id = client.create_goal(&user, &name, &1000, &past_target_date);
+
+    assert_eq!(id, 1);
+    let goal = client.get_goal(&id).unwrap();
+    assert_eq!(goal.target_date, past_target_date);
+}
+
 // ============================================================================
 // init() idempotency and NEXT_ID behavior
 //
