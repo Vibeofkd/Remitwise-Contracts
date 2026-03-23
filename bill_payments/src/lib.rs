@@ -766,11 +766,23 @@ impl BillPayments {
         Ok(())
     }
 
-    /// Get all bills (paid and unpaid)
+    /// Get all bills (paid and unpaid) — admin helper, returns every bill.
     ///
     /// # Returns
-    /// Vec of all Bill structs
+    /// Vec of all Bill structs stored in the contract.
     pub fn get_all_bills(env: Env) -> Vec<Bill> {
+        let bills: Map<u32, Bill> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("BILLS"))
+            .unwrap_or_else(|| Map::new(&env));
+        let mut result = Vec::new(&env);
+        for (_, bill) in bills.iter() {
+            result.push_back(bill);
+        }
+        result
+    }
+
     // -----------------------------------------------------------------------
     // Backward-compat helpers
     // -----------------------------------------------------------------------
