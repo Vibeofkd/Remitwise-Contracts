@@ -5,8 +5,36 @@ use soroban_sdk::{testutils::Address as _, Address, Env, String as SorobanString
 // Import all contract types and clients
 use bill_payments::{BillPayments, BillPaymentsClient};
 use insurance::{Insurance, InsuranceClient};
+use orchestrator::{Orchestrator, OrchestratorClient};
 use remittance_split::{RemittanceSplit, RemittanceSplitClient};
 use savings_goals::{SavingsGoalContract, SavingsGoalContractClient};
+use soroban_sdk::{contract, contractimpl};
+
+#[contract]
+pub struct IntegrationMockFamilyWallet;
+
+#[contractimpl]
+impl IntegrationMockFamilyWallet {
+    /// @notice Always allows spending in integration tests.
+    pub fn check_spending_limit(_env: Env, _caller: Address, _amount: i128) -> bool {
+        true
+    }
+}
+
+#[contract]
+pub struct IntegrationMockRemittanceSplit;
+
+#[contractimpl]
+impl IntegrationMockRemittanceSplit {
+    /// @notice Deterministic 40/30/20/10 split used by orchestrator tests.
+    pub fn calculate_split(env: Env, total_amount: i128) -> soroban_sdk::Vec<i128> {
+        let spending = (total_amount * 40) / 100;
+        let savings = (total_amount * 30) / 100;
+        let bills = (total_amount * 20) / 100;
+        let insurance = (total_amount * 10) / 100;
+        soroban_sdk::Vec::from_array(&env, [spending, savings, bills, insurance])
+    }
+}
 
 /// Integration test that simulates a complete user flow:
 /// 1. Deploy all contracts (remittance_split, savings_goals, bill_payments, insurance)
@@ -325,4 +353,127 @@ fn test_event_topic_compliance_across_contracts() {
 
     // Fail if any non-compliant events found, listing one example for debugging
     assert_eq!(non_compliant.len(), 0u32, "Found events that do not follow the Remitwise topic schema. See EVENTS.md and remitwise-common::RemitwiseEvents for guidance.");
+}
+
+/// @notice Verifies inactive insurance policy fails orchestrated flow safely.
+/// @dev Checks that downstream writes in savings and bills are reverted.
+#[test]
+fn test_orchestrator_flow_inactive_policy_reverts_downstream_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let user = Address::generate(&env);
+
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let wallet_id = env.register_contract(None, IntegrationMockFamilyWallet);
+    let split_id = env.register_contract(None, IntegrationMockRemittanceSplit);
+    let savings_id = env.register_contract(None, SavingsGoalContract);
+    let bills_id = env.register_contract(None, BillPayments);
+    let insurance_id = env.register_contract(None, Insurance);
+
+    let orchestrator_client = OrchestratorClient::new(&env, &orchestrator_id);
+    let savings_client = SavingsGoalContractClient::new(&env, &savings_id);
+    let bills_client = BillPaymentsClient::new(&env, &bills_id);
+    let insurance_client = InsuranceClient::new(&env, &insurance_id);
+
+    let goal_id = savings_client.create_goal(
+        &user,
+        &SorobanString::from_str(&env, "Safety Goal"),
+        &10_000i128,
+        &(env.ledger().timestamp() + 365 * 86400),
+    );
+    let bill_id = bills_client.create_bill(
+        &user,
+        &SorobanString::from_str(&env, "Safety Bill"),
+        &500i128,
+        &(env.ledger().timestamp() + 30 * 86400),
+        &true,
+        &30u32,
+        &SorobanString::from_str(&env, "XLM"),
+    );
+    let policy_id = insurance_client.create_policy(
+        &user,
+        &SorobanString::from_str(&env, "Safety Policy"),
+        &SorobanString::from_str(&env, "health"),
+        &200i128,
+        &25_000i128,
+    );
+    insurance_client.deactivate_policy(&user, &policy_id);
+
+    let result = orchestrator_client.try_execute_remittance_flow(
+        &user,
+        &10_000i128,
+        &wallet_id,
+        &split_id,
+        &savings_id,
+        &bills_id,
+        &insurance_id,
+        &goal_id,
+        &bill_id,
+        &policy_id,
+    );
+    assert!(result.is_err());
+
+    let goal_after = savings_client.get_goal(&goal_id).unwrap();
+    assert_eq!(goal_after.current_amount, 0, "Savings mutation must rollback");
+
+    let bill_after = bills_client.get_bill(&bill_id).unwrap();
+    assert!(!bill_after.paid, "Bill payment mutation must rollback");
+}
+
+/// @notice Verifies missing insurance policy fails orchestrated flow safely.
+/// @dev Uses unknown `policy_id` and asserts no persisted mutations.
+#[test]
+fn test_orchestrator_flow_missing_policy_reverts_downstream_state() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let user = Address::generate(&env);
+
+    let orchestrator_id = env.register_contract(None, Orchestrator);
+    let wallet_id = env.register_contract(None, IntegrationMockFamilyWallet);
+    let split_id = env.register_contract(None, IntegrationMockRemittanceSplit);
+    let savings_id = env.register_contract(None, SavingsGoalContract);
+    let bills_id = env.register_contract(None, BillPayments);
+    let insurance_id = env.register_contract(None, Insurance);
+
+    let orchestrator_client = OrchestratorClient::new(&env, &orchestrator_id);
+    let savings_client = SavingsGoalContractClient::new(&env, &savings_id);
+    let bills_client = BillPaymentsClient::new(&env, &bills_id);
+
+    let goal_id = savings_client.create_goal(
+        &user,
+        &SorobanString::from_str(&env, "Missing Policy Goal"),
+        &10_000i128,
+        &(env.ledger().timestamp() + 365 * 86400),
+    );
+    let bill_id = bills_client.create_bill(
+        &user,
+        &SorobanString::from_str(&env, "Missing Policy Bill"),
+        &500i128,
+        &(env.ledger().timestamp() + 30 * 86400),
+        &true,
+        &30u32,
+        &SorobanString::from_str(&env, "XLM"),
+    );
+
+    let result = orchestrator_client.try_execute_remittance_flow(
+        &user,
+        &10_000i128,
+        &wallet_id,
+        &split_id,
+        &savings_id,
+        &bills_id,
+        &insurance_id,
+        &goal_id,
+        &bill_id,
+        &999_999u32, // missing policy ID
+    );
+    assert!(result.is_err());
+
+    let goal_after = savings_client.get_goal(&goal_id).unwrap();
+    assert_eq!(goal_after.current_amount, 0, "Savings mutation must rollback");
+
+    let bill_after = bills_client.get_bill(&bill_id).unwrap();
+    assert!(!bill_after.paid, "Bill payment mutation must rollback");
 }

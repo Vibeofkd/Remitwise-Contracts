@@ -1,5 +1,5 @@
 use crate::{Orchestrator, OrchestratorClient, OrchestratorError};
-use soroban_sdk::{contract, contractimpl, Address, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Vec};
 use testutils::{generate_test_address, setup_test_env};
 
 // ============================================================================
@@ -41,11 +41,28 @@ impl MockRemittanceSplit {
 #[contract]
 pub struct MockSavingsGoals;
 
+#[derive(Clone)]
+#[contracttype]
+pub struct SavingsState {
+    pub deposit_count: u32,
+}
+
 #[contractimpl]
 impl MockSavingsGoals {
+    /// @notice Returns the savings mock state for rollback assertions.
+    pub fn get_state(env: Env) -> SavingsState {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("STATE"))
+            .unwrap_or(SavingsState { deposit_count: 0 })
+    }
+
     /// Mock implementation of add_to_goal
     /// Panics if goal_id == 999 (simulating goal not found)
     pub fn add_to_goal(_env: Env, _caller: Address, goal_id: u32, amount: i128) -> i128 {
+        let mut state = Self::get_state(_env.clone());
+        state.deposit_count += 1;
+        _env.storage().instance().set(&symbol_short!("STATE"), &state);
         if goal_id == 999 {
             panic!("Goal not found");
         }
@@ -57,11 +74,28 @@ impl MockSavingsGoals {
 #[contract]
 pub struct MockBillPayments;
 
+#[derive(Clone)]
+#[contracttype]
+pub struct BillsState {
+    pub payment_count: u32,
+}
+
 #[contractimpl]
 impl MockBillPayments {
+    /// @notice Returns the bill mock state for rollback assertions.
+    pub fn get_state(env: Env) -> BillsState {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("STATE"))
+            .unwrap_or(BillsState { payment_count: 0 })
+    }
+
     /// Mock implementation of pay_bill
     /// Panics if bill_id == 999 (simulating bill not found or already paid)
-    pub fn pay_bill(_env: Env, _caller: Address, bill_id: u32) {
+    pub fn pay_bill(env: Env, _caller: Address, bill_id: u32) {
+        let mut state = Self::get_state(env.clone());
+        state.payment_count += 1;
+        env.storage().instance().set(&symbol_short!("STATE"), &state);
         if bill_id == 999 {
             panic!("Bill not found or already paid");
         }
@@ -75,9 +109,13 @@ pub struct MockInsurance;
 #[contractimpl]
 impl MockInsurance {
     /// Mock implementation of pay_premium
-    /// Returns false if policy_id == 999 (simulating inactive policy)
+    /// Returns false if policy_id == 998 (simulating inactive policy)
+    /// Panics if policy_id == 999 (simulating missing policy)
     pub fn pay_premium(_env: Env, _caller: Address, policy_id: u32) -> bool {
-        policy_id != 999
+        if policy_id == 999 {
+            panic!("Policy not found");
+        }
+        policy_id != 998
     }
 }
 
@@ -303,6 +341,33 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_insurance_payment_inactive_policy_fails() {
+        let (
+            env,
+            orchestrator_id,
+            family_wallet_id,
+            _remittance_split_id,
+            _savings_id,
+            _bills_id,
+            insurance_id,
+            user,
+        ) = setup_test_env();
+
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+
+        // @notice Inactive policy must fail closed.
+        let result = client.try_execute_insurance_payment(
+            &user,
+            &2000,
+            &family_wallet_id,
+            &insurance_id,
+            &998, // inactive policy mock
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_execute_remittance_flow_succeeds() {
         let (
             env,
@@ -415,6 +480,85 @@ mod tests {
 
         // Should fail (panic gets caught and converted to error)
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_execute_remittance_flow_inactive_insurance_policy_rolls_back() {
+        let (
+            env,
+            orchestrator_id,
+            family_wallet_id,
+            remittance_split_id,
+            savings_id,
+            bills_id,
+            insurance_id,
+            user,
+        ) = setup_test_env();
+
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        let savings_client = MockSavingsGoalsClient::new(&env, &savings_id);
+        let bills_client = MockBillPaymentsClient::new(&env, &bills_id);
+
+        // @dev Insurance fails after savings and bills are invoked.
+        let result = client.try_execute_remittance_flow(
+            &user,
+            &10000,
+            &family_wallet_id,
+            &remittance_split_id,
+            &savings_id,
+            &bills_id,
+            &insurance_id,
+            &1,
+            &1,
+            &998, // inactive policy mock
+        );
+
+        assert!(result.is_err());
+
+        // @notice Atomicity check: writes from prior downstream calls must be rolled back.
+        let savings_state = savings_client.get_state();
+        let bills_state = bills_client.get_state();
+        assert_eq!(savings_state.deposit_count, 0);
+        assert_eq!(bills_state.payment_count, 0);
+    }
+
+    #[test]
+    fn test_execute_remittance_flow_missing_insurance_policy_rolls_back() {
+        let (
+            env,
+            orchestrator_id,
+            family_wallet_id,
+            remittance_split_id,
+            savings_id,
+            bills_id,
+            insurance_id,
+            user,
+        ) = setup_test_env();
+
+        let client = OrchestratorClient::new(&env, &orchestrator_id);
+        let savings_client = MockSavingsGoalsClient::new(&env, &savings_id);
+        let bills_client = MockBillPaymentsClient::new(&env, &bills_id);
+
+        let result = client.try_execute_remittance_flow(
+            &user,
+            &10000,
+            &family_wallet_id,
+            &remittance_split_id,
+            &savings_id,
+            &bills_id,
+            &insurance_id,
+            &1,
+            &1,
+            &999, // missing policy mock
+        );
+
+        assert!(result.is_err());
+
+        // @notice Atomicity check: no hidden state mutation survives failure.
+        let savings_state = savings_client.get_state();
+        let bills_state = bills_client.get_state();
+        assert_eq!(savings_state.deposit_count, 0);
+        assert_eq!(bills_state.payment_count, 0);
     }
 
     #[test]

@@ -57,8 +57,8 @@
 //! ```
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
-    Env, Symbol, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, panic_with_error,
+    symbol_short, Address, Env, Symbol, Vec,
 };
 
 #[cfg(test)]
@@ -550,7 +550,11 @@ impl Orchestrator {
         // Call pay_premium on the insurance contract
         // This will panic if the policy doesn't exist or is inactive
         // The panic will cause the entire transaction to revert (atomicity)
-        insurance_client.pay_premium(caller, &policy_id);
+        // @dev A `false` return must be treated as a hard failure.
+        // Returning `Err` alone would not revert earlier downstream writes.
+        if !insurance_client.pay_premium(caller, &policy_id) {
+            panic_with_error!(env, OrchestratorError::InsurancePaymentFailed);
+        }
 
         Ok(())
     }
@@ -933,6 +937,7 @@ impl Orchestrator {
         bill_id: u32,
         policy_id: u32,
     ) -> Result<RemittanceFlowResult, OrchestratorError> {
+        // @notice This flow is fail-closed: any downstream failure aborts and reverts.
         // Require caller authorization
         caller.require_auth();
 
@@ -991,49 +996,27 @@ impl Orchestrator {
         let insurance_amount = allocations.get(3).unwrap_or(0);
 
         // Step 5: Deposit to savings goal
-        let savings_success =
-            Self::deposit_to_savings(&env, &savings_addr, &caller, goal_id, savings_amount)
-                .map_err(|e| {
-                    Self::emit_error_event(
-                        &env,
-                        &caller,
-                        symbol_short!("savings"),
-                        e as u32,
-                        timestamp,
-                    );
-                    e
-                })
-                .is_ok();
+        Self::deposit_to_savings(&env, &savings_addr, &caller, goal_id, savings_amount).map_err(
+            |e| {
+                Self::emit_error_event(&env, &caller, symbol_short!("savings"), e as u32, timestamp);
+                e
+            },
+        )?;
+        let savings_success = true;
 
         // Step 6: Pay bill
-        let bills_success =
-            Self::execute_bill_payment_internal(&env, &bills_addr, &caller, bill_id)
-                .map_err(|e| {
-                    Self::emit_error_event(
-                        &env,
-                        &caller,
-                        symbol_short!("bills"),
-                        e as u32,
-                        timestamp,
-                    );
-                    e
-                })
-                .is_ok();
+        Self::execute_bill_payment_internal(&env, &bills_addr, &caller, bill_id).map_err(|e| {
+            Self::emit_error_event(&env, &caller, symbol_short!("bills"), e as u32, timestamp);
+            e
+        })?;
+        let bills_success = true;
 
         // Step 7: Pay insurance premium
-        let insurance_success =
-            Self::pay_insurance_premium(&env, &insurance_addr, &caller, policy_id)
-                .map_err(|e| {
-                    Self::emit_error_event(
-                        &env,
-                        &caller,
-                        symbol_short!("insuranc"),
-                        e as u32,
-                        timestamp,
-                    );
-                    e
-                })
-                .is_ok();
+        Self::pay_insurance_premium(&env, &insurance_addr, &caller, policy_id).map_err(|e| {
+            Self::emit_error_event(&env, &caller, symbol_short!("insuranc"), e as u32, timestamp);
+            e
+        })?;
+        let insurance_success = true;
 
         // Build result
         let result = RemittanceFlowResult {

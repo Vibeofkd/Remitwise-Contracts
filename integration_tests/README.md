@@ -46,6 +46,24 @@ test: add deterministic event topic naming compliance tests
 Contact
 - For modifications to the canonical schema, update `remitwise-common/src/lib.rs`
   and coordinate with indexers consuming events.
+
+## Orchestrator Insurance Failure Safety
+
+### What was added
+- `test_orchestrator_flow_inactive_policy_reverts_downstream_state`
+- `test_orchestrator_flow_missing_policy_reverts_downstream_state`
+
+### Security assumptions validated
+- Orchestrated remittance flow is fail-closed for insurance failure paths.
+- If insurance payment fails (inactive or missing policy), prior downstream calls
+  (savings deposit and bill payment) do not leave persistent state mutations.
+- No hidden state mutation survives transaction failure in tested paths.
+
+### Notes for reviewers
+- Tests intentionally use deterministic split and permission mocks so assertions
+  focus only on orchestrator failure semantics and atomicity.
+- Existing multi-contract tests remain unchanged and continue to verify baseline
+  cross-contract behavior.
 # Integration Tests
 
 This module contains integration tests that verify the interaction between multiple RemitWise contracts.
