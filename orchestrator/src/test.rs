@@ -18,7 +18,6 @@ impl MockFamilyWallet {
     }
 }
 
-/// Mock Remittance Split contract for testing
 #[contract]
 pub struct MockRemittanceSplit;
 
