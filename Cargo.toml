@@ -18,9 +18,8 @@ members = [
     "scenarios",
 
     "testutils",
-    "integration_tests",
 
-   
+    "integration_tests",
 ]
 default-members = [
     "remittance_split",

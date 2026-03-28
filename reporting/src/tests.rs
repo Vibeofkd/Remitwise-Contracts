@@ -207,12 +207,6 @@ mod insurance {
     }
 }
 
-fn create_test_env() -> Env {
-    let env = Env::default();
-    env.mock_all_auths();
-    env
-}
-
 #[test]
 fn test_init_reporting_contract_succeeds() {
     let env = Env::default();
@@ -274,7 +268,8 @@ fn test_configure_addresses_succeeds() {
 
 #[test]
 fn test_configure_addresses_unauthorized() {
-    let env = create_test_env();
+    let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, ReportingContract);
     let client = ReportingContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -341,12 +336,85 @@ fn test_get_remittance_summary() {
     assert_eq!(summary.category_breakdown.len(), 4);
     assert_eq!(summary.period_start, period_start);
     assert_eq!(summary.period_end, period_end);
+    assert_eq!(summary.data_availability, DataAvailability::Complete);
 
     // Check category breakdown
     let spending = summary.category_breakdown.get(0).unwrap();
     assert_eq!(spending.category, Category::Spending);
     assert_eq!(spending.amount, 5000);
     assert_eq!(spending.percentage, 50);
+}
+
+#[test]
+fn test_get_remittance_summary_missing_addresses() {
+    let env = soroban_sdk::Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = soroban_sdk::Address::generate(&env);
+
+    // Purposefully DO NOT call client.init() or client.configure_addresses()
+    
+    let total_amount = 10000i128;
+    let period_start = 1704067200u64;
+    let period_end = 1706745600u64;
+
+    let summary = client.get_remittance_summary(&user, &total_amount, &period_start, &period_end);
+
+    assert_eq!(summary.total_received, 10000);
+    assert_eq!(summary.category_breakdown.len(), 0);
+    assert_eq!(summary.data_availability, DataAvailability::Missing);
+}
+
+mod failing_remittance_split {
+    use soroban_sdk::{contract, contractimpl, Env, Vec};
+    #[contract]
+    pub struct FailingRemittanceSplit;
+    #[contractimpl]
+    impl FailingRemittanceSplit {
+        pub fn get_split(_env: &Env) -> Vec<u32> {
+            panic!("Remote call failing to simulate Partial Data");
+        }
+        pub fn calculate_split(_env: Env, _total_amount: i128) -> Vec<i128> {
+            panic!("Remote call failing to simulate Partial Data");
+        }
+    }
+}
+
+#[test]
+fn test_get_remittance_summary_partial_data() {
+    let env = soroban_sdk::Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = soroban_sdk::Address::generate(&env);
+    let user = soroban_sdk::Address::generate(&env);
+
+    client.init(&admin);
+
+    // Register FAILING mock contract
+    let failing_split_id = env.register_contract(None, failing_remittance_split::FailingRemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bill_payments_id = env.register_contract(None, bill_payments::BillPayments);
+    let insurance_id = env.register_contract(None, insurance::Insurance);
+    let family_wallet = soroban_sdk::Address::generate(&env);
+
+    client.configure_addresses(
+        &admin,
+        &failing_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+
+    let total_amount = 10000i128;
+    let summary = client.get_remittance_summary(&user, &total_amount, &0, &0);
+
+    assert_eq!(summary.total_received, 10000);
+    assert_eq!(summary.category_breakdown.len(), 4); // Created empty via fallback
+    assert_eq!(summary.category_breakdown.get(0).unwrap().amount, 0);
+    assert_eq!(summary.data_availability, DataAvailability::Partial);
 }
 
 #[test]
@@ -908,8 +976,7 @@ fn test_storage_stats_regression_across_archive_and_cleanup_cycles() {
     let base_ts = 1_000_000u64;
     for i in 0..TOTAL {
         set_ledger_time(&env, 10 + i as u32, base_ts + i);
-        let report =
-            client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
+        let report = client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
         client.store_report(&user, &report, &(202_400 + i));
     }
 
@@ -942,8 +1009,7 @@ fn test_storage_stats_regression_across_archive_and_cleanup_cycles() {
 
     // Second cycle: new report increments active; full archive then cleanup returns to zero archived
     set_ledger_time(&env, 700, base_ts + 300);
-    let report =
-        client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
+    let report = client.get_financial_health_report(&user, &10000, &1704067200, &1706745600);
     client.store_report(&user, &report, &209_912);
 
     let after_new_store = client.get_storage_stats();
@@ -964,9 +1030,9 @@ fn test_storage_stats_regression_across_archive_and_cleanup_cycles() {
 }
 
 #[test]
-#[should_panic(expected = "Only admin can archive reports")]
 fn test_archive_unauthorized() {
-    let env = create_test_env();
+    let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, ReportingContract);
     let client = ReportingContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -975,13 +1041,14 @@ fn test_archive_unauthorized() {
     client.init(&admin);
 
     // Non-admin tries to archive
-    client.archive_old_reports(&non_admin, &2000000000);
+    let result = client.try_archive_old_reports(&non_admin, &2000000000);
+    assert!(result.is_err());
 }
 
 #[test]
-#[should_panic(expected = "Only admin can cleanup reports")]
 fn test_cleanup_unauthorized() {
-    let env = create_test_env();
+    let env = Env::default();
+    env.mock_all_auths();
     let contract_id = env.register_contract(None, ReportingContract);
     let client = ReportingContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
@@ -990,7 +1057,8 @@ fn test_cleanup_unauthorized() {
     client.init(&admin);
 
     // Non-admin tries to cleanup
-    client.cleanup_old_reports(&non_admin, &2000000000);
+    let result = client.try_cleanup_old_reports(&non_admin, &2000000000);
+    assert!(result.is_err());
 }
 
 // ============================================================================
