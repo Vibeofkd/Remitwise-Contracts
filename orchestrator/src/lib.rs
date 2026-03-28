@@ -208,6 +208,12 @@ pub enum OrchestratorError {
     /// execution is already in progress. This prevents nested execution attacks
     /// and partial-state corruption.
     ReentrancyDetected = 10,
+    /// Contract address references the orchestrator itself
+    SelfReferenceNotAllowed = 11,
+    /// Two or more contract addresses are identical
+    DuplicateContractAddress = 12,
+    /// Nonce has already been used (replay attack detected)
+    NonceAlreadyUsed = 13,
 }
 
 /// Execution state tracking for reentrancy protection.
@@ -224,7 +230,7 @@ pub enum OrchestratorError {
 /// At most one execution can be active at any time. Any attempt to enter
 /// `Executing` state while already executing returns `ReentrancyDetected`.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ExecutionState {
     /// No execution in progress; entry points may be called
@@ -334,6 +340,91 @@ pub struct Orchestrator;
 #[allow(clippy::manual_inspect)]
 #[contractimpl]
 impl Orchestrator {
+    // ============================================================================
+    // Helper Functions - Address Validation
+    // ============================================================================
+
+    /// Validate that none of the provided contract addresses reference the
+    /// orchestrator itself and that all addresses are distinct.
+    fn validate_remittance_flow_addresses(
+        env: &Env,
+        family_wallet_addr: &Address,
+        remittance_split_addr: &Address,
+        savings_addr: &Address,
+        bills_addr: &Address,
+        insurance_addr: &Address,
+    ) -> Result<(), OrchestratorError> {
+        let self_addr = env.current_contract_address();
+        let addrs = [
+            family_wallet_addr,
+            remittance_split_addr,
+            savings_addr,
+            bills_addr,
+            insurance_addr,
+        ];
+        for addr in &addrs {
+            if *addr == &self_addr {
+                return Err(OrchestratorError::SelfReferenceNotAllowed);
+            }
+        }
+        for i in 0..addrs.len() {
+            for j in (i + 1)..addrs.len() {
+                if addrs[i] == addrs[j] {
+                    return Err(OrchestratorError::DuplicateContractAddress);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate address pair used by single-operation entry points.
+    fn validate_two_addresses(
+        env: &Env,
+        family_wallet_addr: &Address,
+        target_addr: &Address,
+    ) -> Result<(), OrchestratorError> {
+        let self_addr = env.current_contract_address();
+        if family_wallet_addr == &self_addr || target_addr == &self_addr {
+            return Err(OrchestratorError::SelfReferenceNotAllowed);
+        }
+        if family_wallet_addr == target_addr {
+            return Err(OrchestratorError::DuplicateContractAddress);
+        }
+        Ok(())
+    }
+
+    // ============================================================================
+    // Helper Functions - Nonce / Replay Protection
+    // ============================================================================
+
+    /// Consume a nonce bound to a (caller, command_type) pair.
+    ///
+    /// Stores a marker in persistent storage under a composite key of
+    /// (caller_hash, command_type_payload, nonce). Returns NonceAlreadyUsed
+    /// if the same triple has been seen before, preventing replay attacks.
+    ///
+    /// # Security
+    /// Nonce is scoped per caller and command type. Once consumed it is
+    /// permanently recorded with no expiry.
+    ///
+    /// # Gas Estimation
+    /// ~600 gas (one persistent read + one persistent write)
+    fn consume_nonce(
+        env: &Env,
+        caller: &Address,
+        command_type: Symbol,
+        nonce: u64,
+    ) -> Result<(), OrchestratorError> {
+        // Composite key binds nonce to (caller, command_type) so the same
+        // nonce value is independent across callers and command types.
+        let key = (caller.clone(), command_type, nonce);
+        if env.storage().persistent().has(&key) {
+            return Err(OrchestratorError::NonceAlreadyUsed);
+        }
+        env.storage().persistent().set(&key, &true);
+        Ok(())
+    }
+
     // ============================================================================
     // Reentrancy Guard - Execution State Management
     // ============================================================================
@@ -753,6 +844,7 @@ impl Orchestrator {
         family_wallet_addr: Address,
         savings_addr: Address,
         goal_id: u32,
+        nonce: u64,
     ) -> Result<(), OrchestratorError> {
         // Reentrancy guard: acquire execution lock
         Self::acquire_execution_lock(&env)?;
@@ -761,6 +853,16 @@ impl Orchestrator {
         caller.require_auth();
 
         let timestamp = env.ledger().timestamp();
+        // Address validation
+        Self::validate_two_addresses(&env, &family_wallet_addr, &savings_addr).map_err(|e| {
+            Self::release_execution_lock(&env);
+            e
+        })?;
+        // Nonce / replay protection
+        Self::consume_nonce(&env, &caller, symbol_short!("exec_sav"), nonce).map_err(|e| {
+            Self::release_execution_lock(&env);
+            e
+        })?;
 
         // Step 1: Check family wallet permission
         let result = (|| {
@@ -852,6 +954,7 @@ impl Orchestrator {
         family_wallet_addr: Address,
         bills_addr: Address,
         bill_id: u32,
+        nonce: u64,
     ) -> Result<(), OrchestratorError> {
         // Reentrancy guard: acquire execution lock
         Self::acquire_execution_lock(&env)?;
@@ -860,6 +963,16 @@ impl Orchestrator {
         caller.require_auth();
 
         let timestamp = env.ledger().timestamp();
+        // Address validation
+        Self::validate_two_addresses(&env, &family_wallet_addr, &bills_addr).map_err(|e| {
+            Self::release_execution_lock(&env);
+            e
+        })?;
+        // Nonce / replay protection
+        Self::consume_nonce(&env, &caller, symbol_short!("exec_bil"), nonce).map_err(|e| {
+            Self::release_execution_lock(&env);
+            e
+        })?;
 
         let result = (|| {
             // Step 1: Check family wallet permission
@@ -951,6 +1064,7 @@ impl Orchestrator {
         family_wallet_addr: Address,
         insurance_addr: Address,
         policy_id: u32,
+        nonce: u64,
     ) -> Result<(), OrchestratorError> {
         // Reentrancy guard: acquire execution lock
         Self::acquire_execution_lock(&env)?;
@@ -959,6 +1073,16 @@ impl Orchestrator {
         caller.require_auth();
 
         let timestamp = env.ledger().timestamp();
+        // Address validation
+        Self::validate_two_addresses(&env, &family_wallet_addr, &insurance_addr).map_err(|e| {
+            Self::release_execution_lock(&env);
+            e
+        })?;
+        // Nonce / replay protection
+        Self::consume_nonce(&env, &caller, symbol_short!("exec_ins"), nonce).map_err(|e| {
+            Self::release_execution_lock(&env);
+            e
+        })?;
 
         let result = (|| {
             // Step 1: Check family wallet permission
