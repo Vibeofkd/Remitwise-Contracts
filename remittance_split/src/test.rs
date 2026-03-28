@@ -1112,11 +1112,15 @@ fn test_instance_ttl_extended_on_initialize_split() {
 //  5. import_snapshot rejects a tampered checksum regardless of version.
 // ============================================================================
 
-/// export_snapshot must embed schema_version == SCHEMA_VERSION (currently 1).
 #[test]
 fn test_export_snapshot_contains_correct_schema_version() {
     let env = Env::default();
-    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
     assert_eq!(
@@ -1125,11 +1129,15 @@ fn test_export_snapshot_contains_correct_schema_version() {
     );
 }
 
-/// import_snapshot with the current schema version (1) must succeed.
 #[test]
 fn test_import_snapshot_current_schema_version_succeeds() {
     let env = Env::default();
-    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
     assert_eq!(snapshot.schema_version, 1);
@@ -1138,12 +1146,15 @@ fn test_import_snapshot_current_schema_version_succeeds() {
     assert!(ok, "import with current schema version must succeed");
 }
 
-/// import_snapshot with a schema_version higher than SCHEMA_VERSION must
-/// return UnsupportedVersion (forward-compat rejection).
 #[test]
 fn test_import_snapshot_future_schema_version_rejected() {
     let env = Env::default();
-    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
     // Simulate a snapshot produced by a newer contract version.
@@ -1157,12 +1168,15 @@ fn test_import_snapshot_future_schema_version_rejected() {
     );
 }
 
-/// import_snapshot with schema_version = 0 (below MIN_SUPPORTED_SCHEMA_VERSION)
-/// must return UnsupportedVersion (backward-compat rejection).
 #[test]
 fn test_import_snapshot_too_old_schema_version_rejected() {
     let env = Env::default();
-    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
     // Simulate a snapshot too old to import.
@@ -1176,12 +1190,15 @@ fn test_import_snapshot_too_old_schema_version_rejected() {
     );
 }
 
-/// import_snapshot with a tampered checksum must return ChecksumMismatch
-/// even when the schema_version is valid.
 #[test]
 fn test_import_snapshot_tampered_checksum_rejected() {
     let env = Env::default();
-    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let mut snapshot = client.export_snapshot(&owner).unwrap();
     snapshot.checksum = snapshot.checksum.wrapping_add(1);
@@ -1194,11 +1211,15 @@ fn test_import_snapshot_tampered_checksum_rejected() {
     );
 }
 
-/// Full export → import round-trip: data restored and nonce incremented.
 #[test]
 fn test_snapshot_export_import_roundtrip_restores_config() {
     let env = Env::default();
-    let (client, owner, _token_id) = setup_initialized_split(&env, 0);
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     // Update so there is something interesting to round-trip.
     client.update_split(&owner, &1, &40, &40, &10, &10);
@@ -1217,12 +1238,13 @@ fn test_snapshot_export_import_roundtrip_restores_config() {
     assert_eq!(config.insurance_percent, 10);
 }
 
-/// Unauthorized caller must not be able to import a snapshot.
 #[test]
 fn test_import_snapshot_unauthorized_caller_rejected() {
     let env = Env::default();
     let (client, owner, _token_id) = setup_initialized_split(&env, 0);
     let other = Address::generate(&env);
+    let token_id = Address::generate(&env);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
 
     let snapshot = client.export_snapshot(&owner).unwrap();
 
