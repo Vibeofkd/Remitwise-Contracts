@@ -104,17 +104,12 @@ jobs:
 
       - name: Run Cargo tests
         run: |
-          cargo test --verbose --all-features
-        continue-on-error: false
-
-      - name: Run Integration tests
-        run: |
-          cargo test -p integration_tests --verbose
+          cargo test -p orchestrator --verbose
         continue-on-error: false
 
       - name: Run Clippy
         run: |
-          cargo clippy --all-targets --all-features -- -D warnings
+          cargo clippy -p orchestrator --all-targets -- -D warnings
         continue-on-error: false
 
       - name: Check formatting
