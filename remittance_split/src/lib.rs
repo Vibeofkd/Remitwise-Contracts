@@ -505,7 +505,7 @@ impl RemittanceSplit {
         // Global sum invariant.
         let total = spending_percent + savings_percent + bills_percent + insurance_percent;
         if total != 100 {
-            return Err(RemittanceSplitError::PercentagesDoNotSumTo100);
+            return Err(RemittanceSplitError::InvalidPercentages);
         }
         Ok(())
     }
@@ -938,6 +938,7 @@ impl RemittanceSplit {
             checksum,
             config,
             schedules,
+            exported_at: env.ledger().timestamp(),
         }))
     }
 
@@ -982,7 +983,7 @@ impl RemittanceSplit {
         //    incomplete and must not be restored.
         if !snapshot.config.initialized {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
-            return Err(RemittanceSplitError::SnapshotNotInitialized);
+            return Err(RemittanceSplitError::NotInitialized);
         }
 
         // 4. Per-field percentage range — reject values that could not have
@@ -1110,7 +1111,7 @@ impl RemittanceSplit {
 
         // 3. Initialized flag
         if !snapshot.config.initialized {
-            return Err(RemittanceSplitError::SnapshotNotInitialized);
+            return Err(RemittanceSplitError::NotInitialized);
         }
 
         // 4. Per-field range
@@ -1814,7 +1815,7 @@ mod test_inline {
     }
 
     /// 3. test_initialize_split_percentages_must_sum_to_100
-    /// Percentages that do not sum to 100 must return PercentagesDoNotSumTo100.
+    /// Percentages that do not sum to 100 must return InvalidPercentages.
     #[test]
     fn test_initialize_split_percentages_must_sum_to_100() {
         let env = Env::default();
@@ -1827,14 +1828,14 @@ mod test_inline {
         let result = client.try_initialize_split(&owner, &0, &40, &30, &15, &5);
         assert_eq!(
             result,
-            Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+            Err(Ok(RemittanceSplitError::InvalidPercentages))
         );
 
         // 50 + 50 + 10 + 0 = 110, not 100
         let result2 = client.try_initialize_split(&owner, &0, &50, &50, &10, &0);
         assert_eq!(
             result2,
-            Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+            Err(Ok(RemittanceSplitError::InvalidPercentages))
         );
     }
 
@@ -1894,14 +1895,14 @@ mod test_inline {
         let result = client.try_update_split(&owner, &1, &60, &30, &15, &5);
         assert_eq!(
             result,
-            Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+            Err(Ok(RemittanceSplitError::InvalidPercentages))
         );
 
         // 10 + 10 + 10 + 10 = 40 — invalid
         let result2 = client.try_update_split(&owner, &1, &10, &10, &10, &10);
         assert_eq!(
             result2,
-            Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100))
+            Err(Ok(RemittanceSplitError::InvalidPercentages))
         );
     }
 
