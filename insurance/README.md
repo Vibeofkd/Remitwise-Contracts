@@ -163,9 +163,18 @@ Returns the new policy's `u32` ID.
 
 ### `pay_premium(caller, policy_id, amount) → bool`
 
-Records a premium payment. `amount` must equal the policy's `monthly_premium` exactly.
+- `owner`: Address of the policy owner
+- `cursor`: Starting policy ID (0 for first page)
+- `limit`: Maximum items per page
+- `env`: Environment
 
-Updates `last_payment_at` and advances `next_payment_due` deterministically.
+**Returns:** `PolicyPage` struct with active items, `count`, and `next_cursor`.
+
+Paging contract semantics:
+- Items are ordered by policy `id` ascending.
+- `next_cursor` is set to the last returned policy ID.
+- `next_cursor = 0` indicates paging is complete.
+- Concatenating all pages until `next_cursor = 0` yields no duplicate policy IDs.
 
 #### Date Progression Logic
 

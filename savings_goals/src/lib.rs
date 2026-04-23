@@ -14,6 +14,7 @@ const GOAL_COMPLETED: Symbol = symbol_short!("completed");
 #[contracttype]
 pub struct GoalCreatedEvent {
     pub goal_id: u32,
+    pub owner: Address,
     pub name: String,
     pub target_amount: i128,
     pub target_date: u64,
@@ -24,6 +25,17 @@ pub struct GoalCreatedEvent {
 #[contracttype]
 pub struct FundsAddedEvent {
     pub goal_id: u32,
+    pub owner: Address,
+    pub amount: i128,
+    pub new_total: i128,
+    pub timestamp: u64,
+}
+
+#[derive(Clone)]
+#[contracttype]
+pub struct FundsWithdrawnEvent {
+    pub goal_id: u32,
+    pub owner: Address,
     pub amount: i128,
     pub new_total: i128,
     pub timestamp: u64,
@@ -33,6 +45,7 @@ pub struct FundsAddedEvent {
 #[contracttype]
 pub struct GoalCompletedEvent {
     pub goal_id: u32,
+    pub owner: Address,
     pub name: String,
     pub final_amount: i128,
     pub timestamp: u64,
@@ -96,6 +109,7 @@ pub enum SavingsGoalsError {
     GoalLocked = 4,
     InsufficientBalance = 5,
     Overflow = 6,
+    InvalidTagContent = 7,
 }
 
 #[contracttype]
@@ -437,15 +451,33 @@ impl SavingsGoalContract {
     /// Requirements:
     /// - At least one tag must be provided.
     /// - Each tag length must be between 1 and 32 characters.
-    fn validate_tags(tags: &Vec<String>) {
+    /// - Allowed charset: [a-z0-9-_]. Uppercase is normalized to lowercase.
+    fn validate_and_normalize_tags(env: &Env, tags: &Vec<String>) -> Vec<String> {
         if tags.is_empty() {
             panic!("Tags cannot be empty");
         }
+        let mut normalized_tags = Vec::new(env);
         for tag in tags.iter() {
-            if tag.is_empty() || tag.len() > 32 {
+            let len = tag.len();
+            if len == 0 || len > 32 {
                 panic!("Tag must be between 1 and 32 characters");
             }
+            let mut buf = [0u8; 32];
+            tag.copy_into_slice(&mut buf[..len as usize]);
+            
+            for i in 0..(len as usize) {
+                let mut c = buf[i];
+                if c >= b'A' && c <= b'Z' {
+                    c = c + (b'a' - b'A');
+                    buf[i] = c;
+                }
+                if !((c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'-' || c == b'_') {
+                    soroban_sdk::panic_with_error!(env, SavingsGoalsError::InvalidTagContent);
+                }
+            }
+            normalized_tags.push_back(String::from_slice(env, &buf[..len as usize]));
         }
+        normalized_tags
     }
 
     /// Adds tags to a goal's metadata.
@@ -459,7 +491,7 @@ impl SavingsGoalContract {
     /// - Emits `(savings, tags_add)` with `(goal_id, caller, tags)`.
     pub fn add_tags_to_goal(env: Env, caller: Address, goal_id: u32, tags: Vec<String>) {
         caller.require_auth();
-        Self::validate_tags(&tags);
+        let normalized_tags = Self::validate_and_normalize_tags(&env, &tags);
         Self::extend_instance_ttl(&env);
 
         let mut goals: Map<u32, SavingsGoal> = env
@@ -481,7 +513,7 @@ impl SavingsGoalContract {
             panic!("Only the goal owner can add tags");
         }
 
-        for tag in tags.iter() {
+        for tag in normalized_tags.iter() {
             goal.tags.push_back(tag);
         }
 
@@ -516,7 +548,7 @@ impl SavingsGoalContract {
     /// - Emits `(savings, tags_rem)` with `(goal_id, caller, tags)`.
     pub fn remove_tags_from_goal(env: Env, caller: Address, goal_id: u32, tags: Vec<String>) {
         caller.require_auth();
-        Self::validate_tags(&tags);
+        let normalized_tags = Self::validate_and_normalize_tags(&env, &tags);
         Self::extend_instance_ttl(&env);
 
         let mut goals: Map<u32, SavingsGoal> = env
@@ -541,7 +573,7 @@ impl SavingsGoalContract {
         let mut new_tags = Vec::new(&env);
         for existing_tag in goal.tags.iter() {
             let mut should_keep = true;
-            for remove_tag in tags.iter() {
+            for remove_tag in normalized_tags.iter() {
                 if existing_tag == remove_tag {
                     should_keep = false;
                     break;
@@ -641,6 +673,7 @@ impl SavingsGoalContract {
 
         let event = GoalCreatedEvent {
             goal_id: next_id,
+            owner: owner.clone(),
             name: goal.name.clone(),
             target_amount,
             target_date,
@@ -649,7 +682,7 @@ impl SavingsGoalContract {
         env.events().publish((GOAL_CREATED,), event.clone());
         env.events().publish(
             (symbol_short!("savings"), SavingsEvent::GoalCreated),
-            next_id,
+            (next_id, owner.clone()),
         );
         RemitwiseEvents::emit(
             &env,
@@ -738,6 +771,7 @@ impl SavingsGoalContract {
 
         let funds_event = FundsAddedEvent {
             goal_id,
+            owner: caller.clone(),
             amount,
             new_total,
             timestamp: env.ledger().timestamp(),
@@ -753,6 +787,7 @@ impl SavingsGoalContract {
         if was_completed && !previously_completed {
             let completed_event = GoalCompletedEvent {
                 goal_id,
+                owner: caller.clone(),
                 name: goal.name.clone(),
                 final_amount: new_total,
                 timestamp: env.ledger().timestamp(),
@@ -828,6 +863,7 @@ impl SavingsGoalContract {
             goals.set(item.goal_id, goal.clone());
             let funds_event = FundsAddedEvent {
                 goal_id: item.goal_id,
+                owner: caller.clone(),
                 amount: item.amount,
                 new_total,
                 timestamp: env.ledger().timestamp(),
@@ -842,6 +878,7 @@ impl SavingsGoalContract {
             if was_completed && !previously_completed {
                 let completed_event = GoalCompletedEvent {
                     goal_id: item.goal_id,
+                    owner: caller.clone(),
                     name: goal.name.clone(),
                     final_amount: new_total,
                     timestamp: env.ledger().timestamp(),
@@ -979,6 +1016,21 @@ impl SavingsGoalContract {
         env.storage()
             .instance()
             .set(&symbol_short!("GOALS"), &goals);
+
+        let withdraw_event = FundsWithdrawnEvent {
+            goal_id,
+            owner: caller.clone(),
+            amount,
+            new_total: new_amount,
+            timestamp: env.ledger().timestamp(),
+        };
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::Transaction,
+            EventPriority::Medium,
+            symbol_short!("funds_rem"),
+            withdraw_event,
+        );
 
         Self::append_audit(&env, symbol_short!("withdraw"), &caller, true);
         env.events().publish(
@@ -1815,5 +1867,7 @@ impl SavingsGoalContract {
 // -----------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------
+#[cfg(test)]
+mod event_test;
 #[cfg(test)]
 mod test;
