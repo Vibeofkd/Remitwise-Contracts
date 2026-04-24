@@ -183,6 +183,15 @@ pub struct ArchivedReport {
     pub archived_at: u64,
 }
 
+/// Paginated result for archived reports
+#[contracttype]
+#[derive(Clone)]
+pub struct ArchivedPage {
+    pub items: Vec<ArchivedReport>,
+    pub next_cursor: u32,
+    pub count: u32,
+}
+
 /// Storage statistics for monitoring
 #[contracttype]
 #[derive(Clone)]
@@ -578,7 +587,7 @@ impl ReportingContract {
 
         // Check savings_goals
         let savings_client = SavingsGoalsClient::new(&env, &addresses.savings_goals);
-        let savings_ok = match savings_client.try_get_all_goals(&Address::from_contract_id(&env, &env.current_contract_address())) {
+        let savings_ok = match savings_client.try_get_all_goals(&env.current_contract_address()) {
             Ok(Ok(_)) => true,
             _ => false,
         };
@@ -590,7 +599,7 @@ impl ReportingContract {
 
         // Check bill_payments
         let bill_client = BillPaymentsClient::new(&env, &addresses.bill_payments);
-        let bill_ok = match bill_client.try_get_total_unpaid(&Address::from_contract_id(&env, &env.current_contract_address())) {
+        let bill_ok = match bill_client.try_get_total_unpaid(&env.current_contract_address()) {
             Ok(Ok(_)) => true,
             _ => false,
         };
@@ -602,7 +611,7 @@ impl ReportingContract {
 
         // Check insurance
         let insurance_client = InsuranceClient::new(&env, &addresses.insurance);
-        let insurance_ok = match insurance_client.try_get_total_monthly_premium(&Address::from_contract_id(&env, &env.current_contract_address())) {
+        let insurance_ok = match insurance_client.try_get_total_monthly_premium(&env.current_contract_address()) {
             Ok(Ok(_)) => true,
             _ => false,
         };
@@ -1186,6 +1195,12 @@ impl ReportingContract {
         let mut archived_count = 0u32;
         let mut to_remove: Vec<(Address, u64)> = Vec::new(&env);
 
+        let mut arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
         for ((user, period_key), report) in reports.iter() {
             if report.generated_at < before_timestamp {
                 let archived_report = ArchivedReport {
@@ -1196,8 +1211,12 @@ impl ReportingContract {
                     archived_at: current_time,
                 };
                 archived.set((user.clone(), period_key), archived_report);
-                to_remove.push_back((user, period_key));
+                to_remove.push_back((user.clone(), period_key));
                 archived_count += 1;
+
+                let mut user_idx = arch_idx.get(user.clone()).unwrap_or_else(|| Vec::new(&env));
+                user_idx.push_back(period_key);
+                arch_idx.set(user, user_idx);
             }
         }
 
@@ -1213,6 +1232,9 @@ impl ReportingContract {
         env.storage()
             .instance()
             .set(&symbol_short!("ARCH_RPT"), &archived);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_IDX"), &arch_idx);
 
         Self::extend_archive_ttl(&env);
         Self::update_storage_stats(&env);
@@ -1234,6 +1256,13 @@ impl ReportingContract {
     /// Vec of ArchivedReport structs
     pub fn get_archived_reports(env: Env, user: Address) -> Vec<ArchivedReport> {
         user.require_auth();
+        let arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let user_idx = arch_idx.get(user.clone()).unwrap_or_else(|| Vec::new(&env));
         let archived: Map<(Address, u64), ArchivedReport> = env
             .storage()
             .instance()
@@ -1241,12 +1270,69 @@ impl ReportingContract {
             .unwrap_or_else(|| Map::new(&env));
 
         let mut result = Vec::new(&env);
-        for ((addr, _), report) in archived.iter() {
-            if addr == user {
+        for period_key in user_idx.iter() {
+            if let Some(report) = archived.get((user.clone(), period_key)) {
                 result.push_back(report);
             }
         }
         result
+    }
+
+    /// Get a paginated list of archived reports for a user.
+    ///
+    /// # Arguments
+    /// * `user` - Address of the user
+    /// * `cursor` - Starting index in the user's archive list
+    /// * `limit` - Maximum number of reports to return
+    ///
+    /// # Returns
+    /// ArchivedPage containing reports and pagination metadata
+    pub fn get_archived_reports_page(
+        env: Env,
+        user: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> ArchivedPage {
+        user.require_auth();
+
+        let arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let user_idx = arch_idx.get(user.clone()).unwrap_or_else(|| Vec::new(&env));
+        let total_count = user_idx.len();
+
+        let archived: Map<(Address, u64), ArchivedReport> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_RPT"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let mut items = Vec::new(&env);
+        if cursor >= total_count {
+            return ArchivedPage {
+                items,
+                next_cursor: cursor,
+                count: total_count,
+            };
+        }
+
+        let end = (cursor + limit).min(total_count);
+        for i in cursor..end {
+            if let Some(period_key) = user_idx.get(i) {
+                if let Some(report) = archived.get((user.clone(), period_key)) {
+                    items.push_back(report);
+                }
+            }
+        }
+
+        ArchivedPage {
+            items,
+            next_cursor: if end < total_count { end } else { end },
+            count: total_count,
+        }
     }
 
     /// Permanently delete old archives before specified timestamp (admin only).
@@ -1286,13 +1372,31 @@ impl ReportingContract {
             .get(&symbol_short!("ARCH_RPT"))
             .unwrap_or_else(|| Map::new(&env));
 
+        let mut arch_idx: Map<Address, Vec<u64>> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_IDX"))
+            .unwrap_or_else(|| Map::new(&env));
+
         let mut deleted_count = 0u32;
         let mut to_remove: Vec<(Address, u64)> = Vec::new(&env);
 
         for ((user, period_key), report) in archived.iter() {
             if report.archived_at < before_timestamp {
-                to_remove.push_back((user, period_key));
+                to_remove.push_back((user.clone(), period_key));
                 deleted_count += 1;
+
+                // Update index
+                if let Some(mut user_idx) = arch_idx.get(user.clone()) {
+                    if let Some(idx) = user_idx.iter().position(|k| k == period_key) {
+                        user_idx.remove(idx as u32);
+                        if user_idx.is_empty() {
+                            arch_idx.remove(user);
+                        } else {
+                            arch_idx.set(user, user_idx);
+                        }
+                    }
+                }
             }
         }
 
@@ -1305,6 +1409,9 @@ impl ReportingContract {
         env.storage()
             .instance()
             .set(&symbol_short!("ARCH_RPT"), &archived);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_IDX"), &arch_idx);
 
         Self::update_storage_stats(&env);
 
