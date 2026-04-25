@@ -206,9 +206,10 @@ impl Insurance {
         let mut buf = [0u8; 64];
         let copy_len = (len as usize).min(buf.len());
         ext_ref.copy_into_slice(&mut buf[..copy_len]);
-        if !buf[..copy_len].iter().all(|&b| {
-            b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b':'
-        }) {
+        if !buf[..copy_len]
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b':')
+        {
             panic!("invalid external_ref charset");
         }
     }

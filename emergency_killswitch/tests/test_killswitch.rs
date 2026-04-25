@@ -1,7 +1,11 @@
 #![cfg(test)]
 
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env, Symbol, symbol_short};
 use emergency_killswitch::{EmergencyKillswitch, EmergencyKillswitchClient};
+use soroban_sdk::{
+    symbol_short,
+    testutils::{Address as _, Ledger},
+    Address, Env, Symbol,
+};
 
 #[test]
 fn test_unauthorized_emergency_trigger() {
@@ -13,7 +17,7 @@ fn test_unauthorized_emergency_trigger() {
     client.initialize(&admin);
 
     let unauthorized = Address::generate(&env);
-    
+
     // We expect a panic when require_auth fails if mock_all_auths is not set
     // or we can use mock_auths to simulate a different caller.
 }
@@ -77,7 +81,7 @@ fn test_max_paused_functions_limit() {
     client.initialize(&admin);
 
     let module = symbol_short!("bill");
-    
+
     for i in 0..10 {
         client.pause_function(&module, &Symbol::new(&env, &format!("f{}", i)));
     }

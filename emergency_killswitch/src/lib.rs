@@ -1,5 +1,7 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
+};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -45,17 +47,17 @@ impl EmergencyKillswitch {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         env.storage().instance().set(&DataKey::GlobalPaused, &true);
-        
+
         env.events().publish(
             (symbol_short!("emergency"), symbol_short!("paused")),
-            (symbol_short!("GLOBAL"), env.ledger().timestamp())
+            (symbol_short!("GLOBAL"), env.ledger().timestamp()),
         );
     }
 
     pub fn unpause(env: Env) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        
+
         let schedule: Option<u64> = env.storage().instance().get(&DataKey::UnpauseSchedule);
         if let Some(time) = schedule {
             if env.ledger().timestamp() < time {
@@ -68,18 +70,23 @@ impl EmergencyKillswitch {
 
         env.events().publish(
             (symbol_short!("emergency"), symbol_short!("unpaused")),
-            (symbol_short!("GLOBAL"), env.ledger().timestamp())
+            (symbol_short!("GLOBAL"), env.ledger().timestamp()),
         );
     }
 
     pub fn schedule_unpause(env: Env, time: u64) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage().instance().set(&DataKey::UnpauseSchedule, &time);
+        env.storage()
+            .instance()
+            .set(&DataKey::UnpauseSchedule, &time);
     }
 
     pub fn is_paused(env: Env) -> bool {
-        env.storage().instance().get(&DataKey::GlobalPaused).unwrap_or(false)
+        env.storage()
+            .instance()
+            .get(&DataKey::GlobalPaused)
+            .unwrap_or(false)
     }
 
     // --- Issue #501: Per-function pause flags ---
@@ -99,11 +106,13 @@ impl EmergencyKillswitch {
                 panic!("max paused functions reached");
             }
             paused_funcs.push_back(func.clone());
-            env.storage().instance().set(&DataKey::PausedFunctions(module_id.clone()), &paused_funcs);
+            env.storage()
+                .instance()
+                .set(&DataKey::PausedFunctions(module_id.clone()), &paused_funcs);
 
             env.events().publish(
                 (symbol_short!("emergency"), symbol_short!("f_paused")),
-                (module_id, func, env.ledger().timestamp())
+                (module_id, func, env.ledger().timestamp()),
             );
         }
     }
@@ -120,20 +129,32 @@ impl EmergencyKillswitch {
 
         if let Some(index) = paused_funcs.first_index_of(func.clone()) {
             paused_funcs.remove(index);
-            env.storage().instance().set(&DataKey::PausedFunctions(module_id.clone()), &paused_funcs);
+            env.storage()
+                .instance()
+                .set(&DataKey::PausedFunctions(module_id.clone()), &paused_funcs);
 
             env.events().publish(
                 (symbol_short!("emergency"), symbol_short!("f_unpause")),
-                (module_id, func, env.ledger().timestamp())
+                (module_id, func, env.ledger().timestamp()),
             );
         }
     }
 
     pub fn is_function_paused(env: Env, module_id: Symbol, func: Symbol) -> bool {
-        if env.storage().instance().get(&DataKey::GlobalPaused).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::GlobalPaused)
+            .unwrap_or(false)
+        {
             return true;
         }
-        if env.storage().instance().get(&DataKey::ModulePaused(module_id.clone())).unwrap_or(false) {
+        if env
+            .storage()
+            .instance()
+            .get(&DataKey::ModulePaused(module_id.clone()))
+            .unwrap_or(false)
+        {
             return true;
         }
 
@@ -149,22 +170,26 @@ impl EmergencyKillswitch {
     pub fn pause_module(env: Env, module_id: Symbol) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage().instance().set(&DataKey::ModulePaused(module_id.clone()), &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::ModulePaused(module_id.clone()), &true);
 
         env.events().publish(
             (symbol_short!("emergency"), symbol_short!("m_paused")),
-            (module_id, env.ledger().timestamp())
+            (module_id, env.ledger().timestamp()),
         );
     }
 
     pub fn unpause_module(env: Env, module_id: Symbol) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
-        env.storage().instance().set(&DataKey::ModulePaused(module_id.clone()), &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::ModulePaused(module_id.clone()), &false);
 
         env.events().publish(
             (symbol_short!("emergency"), symbol_short!("m_unpause")),
-            (module_id, env.ledger().timestamp())
+            (module_id, env.ledger().timestamp()),
         );
     }
 }

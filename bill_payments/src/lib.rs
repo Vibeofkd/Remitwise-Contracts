@@ -206,20 +206,32 @@ impl BillPayments {
         idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Append `bill_id` to the active index for `owner`.
-    /// IDs are appended in creation order, which is ID-ascending by construction.
+    /// Insert `bill_id` into the active index for `owner` in ascending order.
     fn index_add_active(env: &Env, owner: &Address, bill_id: u32) {
         let mut idx: Map<Address, Vec<u32>> = env
             .storage()
             .instance()
             .get(&STORAGE_OWNER_INDEX)
             .unwrap_or_else(|| Map::new(env));
-        let mut ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
-        ids.push_back(bill_id);
-        idx.set(owner.clone(), ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_OWNER_INDEX, &idx);
+        let ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
+        let mut new_ids: Vec<u32> = Vec::new(env);
+        let mut inserted = false;
+        for id in ids.iter() {
+            if !inserted {
+                if bill_id == id {
+                    inserted = true;
+                } else if bill_id < id {
+                    new_ids.push_back(bill_id);
+                    inserted = true;
+                }
+            }
+            new_ids.push_back(id);
+        }
+        if !inserted {
+            new_ids.push_back(bill_id);
+        }
+        idx.set(owner.clone(), new_ids);
+        env.storage().instance().set(&STORAGE_OWNER_INDEX, &idx);
     }
 
     /// Remove `bill_id` from the active index for `owner`.
@@ -237,24 +249,35 @@ impl BillPayments {
             }
         }
         idx.set(owner.clone(), new_ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_OWNER_INDEX, &idx);
+        env.storage().instance().set(&STORAGE_OWNER_INDEX, &idx);
     }
 
-    /// Append `bill_id` to the archived index for `owner`.
+    /// Insert `bill_id` into the archived index for `owner` in ascending order.
     fn index_add_archived(env: &Env, owner: &Address, bill_id: u32) {
         let mut idx: Map<Address, Vec<u32>> = env
             .storage()
             .instance()
             .get(&STORAGE_ARCH_INDEX)
             .unwrap_or_else(|| Map::new(env));
-        let mut ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
-        ids.push_back(bill_id);
-        idx.set(owner.clone(), ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_ARCH_INDEX, &idx);
+        let ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
+        let mut new_ids: Vec<u32> = Vec::new(env);
+        let mut inserted = false;
+        for id in ids.iter() {
+            if !inserted {
+                if bill_id == id {
+                    inserted = true;
+                } else if bill_id < id {
+                    new_ids.push_back(bill_id);
+                    inserted = true;
+                }
+            }
+            new_ids.push_back(id);
+        }
+        if !inserted {
+            new_ids.push_back(bill_id);
+        }
+        idx.set(owner.clone(), new_ids);
+        env.storage().instance().set(&STORAGE_ARCH_INDEX, &idx);
     }
 
     /// Remove `bill_id` from the archived index for `owner`.
@@ -272,9 +295,7 @@ impl BillPayments {
             }
         }
         idx.set(owner.clone(), new_ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_ARCH_INDEX, &idx);
+        env.storage().instance().set(&STORAGE_ARCH_INDEX, &idx);
     }
 
     // -----------------------------------------------------------------------
@@ -365,10 +386,7 @@ impl BillPayments {
     ///
     /// Allowed characters: ASCII alphanumeric, hyphens, underscores, dots, colons.
     /// Length must be within `[MIN_EXTERNAL_REF_LEN, MAX_EXTERNAL_REF_LEN]`.
-    fn validate_external_ref(
-        env: &Env,
-        ext_ref: &String,
-    ) -> Result<String, BillPaymentsError> {
+    fn validate_external_ref(env: &Env, ext_ref: &String) -> Result<String, BillPaymentsError> {
         let len = ext_ref.len();
         if len < MIN_EXTERNAL_REF_LEN || len > MAX_EXTERNAL_REF_LEN {
             return Err(BillPaymentsError::InvalidExternalRef);
@@ -409,9 +427,7 @@ impl BillPayments {
     }
 
     fn save_ext_ref_index(env: &Env, idx: &Map<Address, Map<String, u32>>) {
-        env.storage()
-            .instance()
-            .set(&STORAGE_EXT_REF_IDX, idx);
+        env.storage().instance().set(&STORAGE_EXT_REF_IDX, idx);
     }
 
     /// Claim `ext_ref` for `owner` → `bill_id`. Fails if already claimed by another bill.
@@ -422,9 +438,8 @@ impl BillPayments {
         bill_id: u32,
     ) -> Result<(), BillPaymentsError> {
         let mut idx = Self::get_ext_ref_index(env);
-        let mut owner_map: Map<String, u32> = idx
-            .get(owner.clone())
-            .unwrap_or_else(|| Map::new(env));
+        let mut owner_map: Map<String, u32> =
+            idx.get(owner.clone()).unwrap_or_else(|| Map::new(env));
 
         if let Some(existing_id) = owner_map.get(ext_ref.clone()) {
             if existing_id != bill_id {
@@ -1528,27 +1543,25 @@ impl BillPayments {
 
         for (id, bill) in bills.iter() {
             if let Some(paid_at) = bill.paid_at {
-                    if bill.paid && paid_at < before_timestamp {
-                        // Release external_ref from the active index during archival
-                        if let Some(ref r) = bill.external_ref {
-                            Self::release_external_ref(&env, &bill.owner, r);
-                        }
+                if bill.paid && paid_at < before_timestamp {
+                    // Release external_ref from the active index during archival
+                    if let Some(ref r) = bill.external_ref {
+                        Self::release_external_ref(&env, &bill.owner, r);
+                    }
 
-                        let archived_bill = ArchivedBill {
-                            id: bill.id,
-                            owner: bill.owner.clone(),
-                            name: bill.name.clone(),
-                            external_ref: bill.external_ref.clone(),
-                            amount: bill.amount,
-                            paid_at,
-                            archived_at: current_time,
-                            tags: bill.tags.clone(),
-                            currency: bill.currency.clone(),
-                        };
+                    let archived_bill = ArchivedBill {
+                        id: bill.id,
+                        owner: bill.owner.clone(),
+                        name: bill.name.clone(),
+                        external_ref: bill.external_ref.clone(),
+                        amount: bill.amount,
+                        paid_at,
+                        archived_at: current_time,
+                        tags: bill.tags.clone(),
+                        currency: bill.currency.clone(),
+                    };
                     archived.set(id, archived_bill);
-                    let mut owner_ids = Self::get_owner_index(&env, &bill.owner);
-                    owner_ids.push_back(id);
-                    Self::set_owner_index(&env, &bill.owner, owner_ids);
+                    Self::index_add_archived(&env, &bill.owner, id);
                     to_remove.push_back(id);
                     archived_count += 1;
                 }
@@ -1639,7 +1652,9 @@ impl BillPayments {
         Self::index_remove_archived(&env, &caller, bill_id);
         Self::index_add_active(&env, &caller, bill_id);
 
-        env.storage().instance().set(&symbol_short!("BILLS"), &bills);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("BILLS"), &bills);
         env.storage()
             .instance()
             .set(&symbol_short!("ARCH_BILL"), &archived);
@@ -2198,6 +2213,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(env, "XLM"),
+                &None,
             );
             ids.push_back(id);
         }
@@ -2433,6 +2449,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
             client.create_bill(
                 &owner_b,
@@ -2443,6 +2460,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2489,7 +2507,7 @@ mod test {
         let owner = Address::generate(&env);
 
         setup_bills(&env, &client, &owner, 3);
-        let page = client.get_overdue_bills(&owner, &0, &10);
+        let page = client.get_overdue_bills(&0, &10);
         assert_eq!(page.count, 0);
     }
 
@@ -2517,6 +2535,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2525,11 +2544,11 @@ mod test {
         env.ledger().set_timestamp(25000);
 
         // Now get_overdue_bills will actually find the 6 bills
-        let page1 = client.get_overdue_bills(&owner, &0, &4);
+        let page1 = client.get_overdue_bills(&0, &4);
         assert_eq!(page1.count, 4);
         assert!(page1.next_cursor > 0);
 
-        let page2 = client.get_overdue_bills(&owner, &page1.next_cursor, &4);
+        let page2 = client.get_overdue_bills(&page1.next_cursor, &4);
         assert_eq!(page2.count, 2);
         assert_eq!(page2.next_cursor, 0);
     }
@@ -2652,6 +2671,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
             owner_a_ids.push_back(id_a);
 
@@ -2664,6 +2684,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2708,6 +2729,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
             ids.push_back(id);
             client.create_bill(
@@ -2719,6 +2741,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2762,6 +2785,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2808,6 +2832,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2882,6 +2907,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "USDC"),
+            &None,
         );
         client.create_bill(
             &owner,
@@ -2892,6 +2918,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
         let paid_usdc_id = client.create_bill(
             &owner,
@@ -2902,6 +2929,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "usdc"),
+            &None,
         );
         client.create_bill(
             &owner,
@@ -2912,6 +2940,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "USDC"),
+            &None,
         );
         client.create_bill(
             &owner,
@@ -2922,6 +2951,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, " usdc "),
+            &None,
         );
 
         client.pay_bill(&owner, &paid_usdc_id);
@@ -2993,6 +3023,7 @@ mod test {
             &1,    // frequency_days = 1
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill
@@ -3028,6 +3059,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill
@@ -3066,6 +3098,7 @@ mod test {
             &365,  // frequency_days = 365
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill
@@ -3108,6 +3141,7 @@ mod test {
             &30,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Warp to late payment time
@@ -3140,6 +3174,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3190,6 +3225,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3237,6 +3273,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill early (at time 500_000)
@@ -3276,6 +3313,7 @@ mod test {
             &frequency,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3313,6 +3351,7 @@ mod test {
             &30,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3349,6 +3388,7 @@ mod test {
             &30,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3390,6 +3430,7 @@ mod test {
             &freq,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         client.pay_bill(&owner, &bill_id);
@@ -3435,8 +3476,8 @@ mod test {
                     &false,
                     &0,
                     &None,
-
                     &String::from_str(&env, "XLM"),
+                    &None,
                 );
             }
 
@@ -3450,15 +3491,15 @@ mod test {
                     &false,
                     &0,
                     &None,
-
                     &String::from_str(&env, "XLM"),
+                    &None,
                 );
             }
 
             // Fast-forward to 'now' so they become overdue
             env.ledger().set_timestamp(now);
 
-            let page = client.get_overdue_bills(&owner, &0, &50);
+            let page = client.get_overdue_bills(&0, &50);
             for bill in page.items.iter() {
                 prop_assert!(bill.due_date < now, "returned bill must be past due");
             }
@@ -3489,12 +3530,12 @@ mod test {
                     &false,
                     &0,
                     &None,
-
                     &String::from_str(&env, "XLM"),
+                    &None,
                 );
             }
 
-            let page = client.get_overdue_bills(&owner, &0, &50);
+            let page = client.get_overdue_bills(&0, &50);
             prop_assert_eq!(
                 page.count,
                 0u32,
@@ -3532,8 +3573,8 @@ mod test {
                 &true,
                 &freq_days,
                 &None,
-
                 &String::from_str(&env, "XLM"),
+                &None,
             );
 
             // Fast-forward to the payment time
@@ -3590,6 +3631,7 @@ mod test {
             &0,
             &None,
             &currency,
+            &None,
         );
 
         let result_zero = client.try_create_bill(
@@ -3601,6 +3643,7 @@ mod test {
             &0,
             &None,
             &currency,
+            &None,
         );
 
         // 4. Assertions
@@ -3655,9 +3698,10 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(
             page.count, 0,
             "Bill must not appear overdue when current_time == due_date"
@@ -3685,13 +3729,14 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(page.count, 0);
 
         env.ledger().set_timestamp(due_date + 1);
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(
             page.count, 1,
             "Bill must appear overdue exactly one second past due_date"
@@ -3721,6 +3766,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // This one will be "DueNow" later
@@ -3734,12 +3780,13 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // 3. WARP to the "Present" (2,000_000)
         env.ledger().set_timestamp(2_000_000);
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
 
         // Now overdue_target (1.5M) is < current (2M) -> OVERDUE
         // due_now_target (2M) is NOT < current (2M) -> NOT OVERDUE
@@ -3769,13 +3816,14 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(page.count, 0);
 
         env.ledger().set_timestamp(due_date + day);
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(
             page.count, 1,
             "Bill must be overdue one full day past due_date"
@@ -3807,6 +3855,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
     }
 
@@ -3833,6 +3882,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // 'other' attempts to pay owner's bill
@@ -3862,6 +3912,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // This will panic as expected because we are NOT mocking auths for this call
@@ -3889,6 +3940,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         let result = client.try_cancel_bill(&other, &bill_id);
@@ -3913,6 +3965,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         let result =
@@ -3938,6 +3991,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
         client.pay_bill(&owner, &bill_id);
 
@@ -3967,6 +4021,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
         let bob_bill = client.create_bill(
             &bob,
@@ -3977,6 +4032,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         let mut ids = Vec::new(&env);
@@ -4027,27 +4083,77 @@ mod test {
 
         // Valid chars: alphanumeric, -, _, ., :
         let valid_ref = String::from_str(&env, "ABC-123_abc.def:000");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(valid_ref), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(valid_ref),
+            &currency,
+            &None,
+        );
         assert!(res.is_ok());
 
         // Invalid char: space
         let invalid_ref = String::from_str(&env, "REF 1");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(invalid_ref), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(invalid_ref),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
 
         // Invalid char: @
         let invalid_ref2 = String::from_str(&env, "ref@123");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(invalid_ref2), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(invalid_ref2),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
 
         // Length limits
         let too_short = String::from_str(&env, "");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(too_short), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(too_short),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
 
         let too_long_str = "a".repeat(65);
         let too_long = String::from_str(&env, &too_long_str);
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(too_long), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(too_long),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
     }
 
@@ -4065,14 +4171,44 @@ mod test {
         let ext_ref = String::from_str(&env, "REF-001");
 
         // Owner A creates bill with REF-001
-        client.create_bill(&owner_a, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        client.create_bill(
+            &owner_a,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // Owner A tries to create ANOTHER bill with SAME ref -> Fails
-        let res = client.try_create_bill(&owner_a, &name, &200, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let res = client.try_create_bill(
+            &owner_a,
+            &name,
+            &200,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::DuplicateExternalRef)));
 
         // Owner B tries to create bill with SAME ref -> Success (isolated)
-        let res_b = client.try_create_bill(&owner_b, &name, &300, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let res_b = client.try_create_bill(
+            &owner_b,
+            &name,
+            &300,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert!(res_b.is_ok());
     }
 
@@ -4088,20 +4224,50 @@ mod test {
         let currency = String::from_str(&env, "XLM");
         let ext_ref = String::from_str(&env, "REF-001");
 
-        let id1 = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // Clear ref on ID1
         client.set_external_ref(&owner, &id1, &None);
 
         // Now REF-001 is free
-        let id2 = client.create_bill(&owner, &name, &200, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id2 = client.create_bill(
+            &owner,
+            &name,
+            &200,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert!(id2 > id1);
 
         // Cancel ID2
         client.cancel_bill(&owner, &id2);
 
         // Now REF-001 is free again
-        let id3 = client.create_bill(&owner, &name, &300, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id3 = client.create_bill(
+            &owner,
+            &name,
+            &300,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert!(id3 > id2);
     }
 
@@ -4118,14 +4284,34 @@ mod test {
         let ext_ref = String::from_str(&env, "REF-001");
 
         // 1. Create and Pay Bill 1
-        let id1 = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         client.pay_bill(&owner, &id1);
 
         // 2. Archive Bill 1 (frees REF-001 for active bills)
         client.archive_paid_bills(&owner, &u64::MAX);
 
         // 3. Create Bill 2 with SAME ref
-        let _id2 = client.create_bill(&owner, &name, &200, &3000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let _id2 = client.create_bill(
+            &owner,
+            &name,
+            &200,
+            &3000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // 4. Try to Restore Bill 1 -> Conflicts with Bill 2
         let res = client.try_restore_bill(&owner, &id1);
@@ -4145,7 +4331,17 @@ mod test {
         let ext_ref = String::from_str(&env, "REF-RECUR");
 
         // Create recurring bill with ref
-        let id1 = client.create_bill(&owner, &name, &100, &2000000, &true, &30, &Some(ext_ref.clone()), &currency);
+        let id1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &true,
+            &30,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // Pay it. This creates the next instance.
         // If we cloned the ref, it would fail.
@@ -4154,7 +4350,10 @@ mod test {
         // Check the new bill
         let id2 = 2u32;
         let bill2 = client.get_bill(&id2).unwrap();
-        assert_eq!(bill2.external_ref, None, "Next recurring instance should have None ref to avoid conflict");
+        assert_eq!(
+            bill2.external_ref, None,
+            "Next recurring instance should have None ref to avoid conflict"
+        );
 
         // Now we can reuse the ref if we clear it from the old one or archive it.
         client.archive_paid_bills(&owner, &u64::MAX); // Frees the ref from id1

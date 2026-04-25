@@ -67,6 +67,7 @@ mod savings_goals {
                 target_date: 1735689600,
                 locked: true,
                 unlock_date: None,
+                tags: Vec::new(&env),
             });
             goals.push_back(SavingsGoal {
                 id: 2,
@@ -77,6 +78,7 @@ mod savings_goals {
                 target_date: 1735689600,
                 locked: true,
                 unlock_date: None,
+                tags: Vec::new(&env),
             });
             goals
         }

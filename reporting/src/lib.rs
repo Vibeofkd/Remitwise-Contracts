@@ -292,6 +292,7 @@ pub struct SavingsGoal {
     pub target_date: u64,
     pub locked: bool,
     pub unlock_date: Option<u64>,
+    pub tags: Vec<soroban_sdk::String>,
 }
 
 #[contracttype]
@@ -874,8 +875,8 @@ impl ReportingContract {
             }
         }
 
-        let completion_percentage = safe_percent(total_saved, total_target, 100)
-            .clamp(0, 100) as u32;
+        let completion_percentage =
+            safe_percent(total_saved, total_target, 100).clamp(0, 100) as u32;
         SavingsReport {
             total_goals,
             completed_goals: completed_count,
@@ -1041,8 +1042,8 @@ impl ReportingContract {
         }
 
         let annual_premium = monthly_premium.saturating_mul(12);
-        let coverage_to_premium_ratio = safe_percent(total_coverage, annual_premium, 100)
-            .clamp(0, u32::MAX as i128) as u32;
+        let coverage_to_premium_ratio =
+            safe_percent(total_coverage, annual_premium, 100).clamp(0, u32::MAX as i128) as u32;
 
         InsuranceReport {
             active_policies,
@@ -1173,7 +1174,12 @@ impl ReportingContract {
     ) -> Result<TopNBillsReport, ReportingError> {
         Self::validate_period(period_start, period_end)?;
         user.require_auth();
-        Ok(Self::get_top_bills_report_internal(&env, user, period_start, period_end))
+        Ok(Self::get_top_bills_report_internal(
+            &env,
+            user,
+            period_start,
+            period_end,
+        ))
     }
 
     fn get_top_bills_report_internal(
@@ -1252,7 +1258,12 @@ impl ReportingContract {
     ) -> Result<TopNSavingsReport, ReportingError> {
         Self::validate_period(period_start, period_end)?;
         user.require_auth();
-        Ok(Self::get_top_savings_report_internal(&env, user, period_start, period_end))
+        Ok(Self::get_top_savings_report_internal(
+            &env,
+            user,
+            period_start,
+            period_end,
+        ))
     }
 
     fn get_top_savings_report_internal(

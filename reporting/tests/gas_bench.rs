@@ -145,6 +145,7 @@ macro_rules! mock_savings {
                             target_date: 1_800_000_000,
                             locked: false,
                             unlock_date: None,
+                            tags: Vec::new(&env),
                         });
                     }
                     goals
