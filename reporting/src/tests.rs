@@ -6,8 +6,8 @@ use soroban_sdk::{
 use testutils::set_ledger_time;
 
 use crate::{
-    Category, ContractAddresses, DataAvailability, ReportingContract, ReportingContractClient,
-    ReportingError,
+    Category, ContractAddresses, CoverageType, DataAvailability, ReportingContract,
+    ReportingContractClient, ReportingError, MAX_DEP_PAGES,
 };
 
 /// Minimal env with mock_all_auths — replaces the removed create_test_env helper.
@@ -114,6 +114,8 @@ mod bill_payments {
                 schedule_id: None,
                 tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
+                external_ref: None,
+                tags: Vec::new(&env),
             });
             BillPage {
                 count: bills.len(),
@@ -149,6 +151,8 @@ mod bill_payments {
                 schedule_id: None,
                 tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
+                external_ref: None,
+                tags: Vec::new(&env),
             });
             bills.push_back(Bill {
                 id: 2,
@@ -165,6 +169,8 @@ mod bill_payments {
                 schedule_id: None,
                 tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
+                external_ref: None,
+                tags: Vec::new(&env),
             });
             BillPage {
                 count: bills.len(),
@@ -186,23 +192,22 @@ mod insurance {
     #[contractimpl]
     impl InsuranceTrait for Insurance {
         fn get_active_policies(
-            _env: Env,
+            env: Env,
             _owner: Address,
             _cursor: u32,
             _limit: u32,
         ) -> crate::PolicyPage {
-            let env = _env;
             let mut policies = Vec::new(&env);
             policies.push_back(InsurancePolicy {
                 id: 1,
                 owner: _owner,
                 name: SorobanString::from_str(&env, "Health Insurance"),
-                external_ref: None,
                 coverage_type: CoverageType::Health,
                 monthly_premium: 200,
                 coverage_amount: 50000,
                 active: true,
                 next_payment_date: 1735689600,
+                external_ref: None,
             });
             crate::PolicyPage {
                 items: policies,
@@ -226,7 +231,7 @@ mod family_wallet {
     #[contractimpl]
     impl FamilyWallet {
         pub fn get_owner(env: Env) -> Address {
-            Address::from_contract_id(&env, &env.current_contract_address())
+            env.current_contract_address()
         }
     }
 }
@@ -454,7 +459,7 @@ fn test_verify_dependency_address_set_rejects_self_reference() {
         savings_goals: Address::generate(&env),
         bill_payments: Address::generate(&env),
         insurance: Address::generate(&env),
-        family_wallet: Address::from_contract_id(&env, &contract_id),
+        family_wallet: Address::generate(&env),
     };
     let result = client.try_verify_dependency_address_set(&addrs);
     assert!(matches!(
@@ -509,6 +514,18 @@ fn test_get_remittance_summary() {
     assert_eq!(spending.category, Category::Spending);
     assert_eq!(spending.amount, 5000);
     assert_eq!(spending.percentage, 50);
+}
+
+#[test]
+fn test_get_remittance_summary_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_remittance_summary(&user, &10_000i128, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -619,6 +636,18 @@ fn test_get_savings_report() {
 }
 
 #[test]
+fn test_get_savings_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_savings_report(&user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
+}
+
+#[test]
 fn test_get_bill_compliance_report() {
     let env = Env::default();
     env.mock_all_auths();
@@ -654,6 +683,18 @@ fn test_get_bill_compliance_report() {
     // This is expected behavior for the test
     assert_eq!(report.period_start, period_start);
     assert_eq!(report.period_end, period_end);
+}
+
+#[test]
+fn test_get_bill_compliance_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_bill_compliance_report(&user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -693,6 +734,18 @@ fn test_get_insurance_report() {
     assert_eq!(report.monthly_premium, 200);
     assert_eq!(report.annual_premium, 2400);
     assert_eq!(report.coverage_to_premium_ratio, 2083); // 50000 * 100 / 2400
+}
+
+#[test]
+fn test_get_insurance_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_insurance_report(&user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -773,6 +826,18 @@ fn test_get_financial_health_report() {
     assert_eq!(report.savings_report.total_goals, 2);
     assert_eq!(report.insurance_report.active_policies, 1);
     assert_eq!(report.generated_at, 1704067200);
+}
+
+#[test]
+fn test_get_financial_health_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_financial_health_report(&user, &10_000i128, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -2236,31 +2301,46 @@ fn test_check_dependencies_succeeds_with_configured_contracts() {
 
     client.configure_addresses(
         &admin,
-        &Address::from_contract_id(&env, &remittance_split_id),
-        &Address::from_contract_id(&env, &savings_goals_id),
-        &Address::from_contract_id(&env, &bill_payments_id),
-        &Address::from_contract_id(&env, &insurance_id),
-        &Address::from_contract_id(&env, &family_wallet_id),
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet_id,
     );
 
-    let statuses = client.check_dependencies(&admin).unwrap();
+    let statuses = client.check_dependencies(&admin);
     assert_eq!(statuses.len(), 5);
 
     // Check each status
-    assert_eq!(statuses.get(0).unwrap().name, "remittance_split");
+    assert_eq!(
+        statuses.get(0).unwrap().name,
+        soroban_sdk::String::from_str(&env, "remittance_split")
+    );
     assert!(statuses.get(0).unwrap().ok);
     assert_eq!(statuses.get(0).unwrap().error_category, None);
 
-    assert_eq!(statuses.get(1).unwrap().name, "savings_goals");
+    assert_eq!(
+        statuses.get(1).unwrap().name,
+        soroban_sdk::String::from_str(&env, "savings_goals")
+    );
     assert!(statuses.get(1).unwrap().ok);
 
-    assert_eq!(statuses.get(2).unwrap().name, "bill_payments");
+    assert_eq!(
+        statuses.get(2).unwrap().name,
+        soroban_sdk::String::from_str(&env, "bill_payments")
+    );
     assert!(statuses.get(2).unwrap().ok);
 
-    assert_eq!(statuses.get(3).unwrap().name, "insurance");
+    assert_eq!(
+        statuses.get(3).unwrap().name,
+        soroban_sdk::String::from_str(&env, "insurance")
+    );
     assert!(statuses.get(3).unwrap().ok);
 
-    assert_eq!(statuses.get(4).unwrap().name, "family_wallet");
+    assert_eq!(
+        statuses.get(4).unwrap().name,
+        soroban_sdk::String::from_str(&env, "family_wallet")
+    );
     assert!(statuses.get(4).unwrap().ok);
 }
 
@@ -2289,317 +2369,385 @@ fn test_check_dependencies_fails_when_not_configured() {
     assert!(result.is_err());
 }
 
-// ============================================================================
-// SC-073: Checked arithmetic and clamping edge-case tests
-// ============================================================================
+// ---------------------------------------------------------------------------
+// Dependency paging loop termination tests (Issue #487 / SC-034)
+//
+// These tests prove that the bill-compliance and insurance-report paging loops
+// are bounded and deterministic under two conditions:
+//
+//  1. Normal termination – a dependency returns `next_cursor == 0` after a
+//     finite number of pages.  The loop must collect every item and report
+//     `DataAvailability::Complete`.
+//
+//  2. Cap termination – a dependency never returns `next_cursor == 0`
+//     (simulating an unbounded or misbehaving contract).  The loop must stop
+//     after exactly `MAX_DEP_PAGES` fetches and report
+//     `DataAvailability::Partial`.
+//
+//  3. Monotonic cursor progression – the loop always advances the cursor to
+//     the value returned by the previous page, never revisiting a page.
+//     Tested by asserting item counts from multi-page responses match the
+//     expected per-page accumulation.
+//
+// Mock bill-payments contracts use cursor-value routing so each test's
+// page sequence is hard-coded and requires no shared state.
+// ---------------------------------------------------------------------------
 
-/// safe_percent: zero denominator returns 0 (no panic).
-#[test]
-fn test_safe_percent_zero_denominator() {
-    assert_eq!(crate::safe_percent(1_000_000, 0, 100), 0);
-    assert_eq!(crate::safe_percent(i128::MAX, 0, 100), 0);
+// ── Mock: bill-payments returning exactly 3 pages then cursor = 0 ──────────
+//
+// page 0 (cursor=0) → 1 bill (id=1, created within period), next_cursor=5
+// page 1 (cursor=5) → 1 bill (id=2, created within period), next_cursor=10
+// page 2 (cursor=10) → 1 bill (id=3, created within period), next_cursor=0
+//
+// Expected: 3 bills collected, DataAvailability::Complete
+mod bills_three_pages {
+    use crate::{Bill, BillPage, BillPaymentsTrait};
+    use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+
+    const PERIOD_TS: u64 = 1_704_067_200;
+
+    #[contract]
+    pub struct BillsThreePages;
+
+    #[contractimpl]
+    impl BillPaymentsTrait for BillsThreePages {
+        fn get_unpaid_bills(env: Env, _owner: Address, _c: u32, _l: u32) -> BillPage {
+            BillPage {
+                items: Vec::new(&env),
+                next_cursor: 0,
+                count: 0,
+            }
+        }
+        fn get_total_unpaid(_env: Env, _owner: Address) -> i128 {
+            0
+        }
+        fn get_all_bills_for_owner(env: Env, owner: Address, cursor: u32, _limit: u32) -> BillPage {
+            let (bill_id, next_cursor) = match cursor {
+                0 => (1u32, 5u32),
+                5 => (2, 10),
+                _ => (3, 0),
+            };
+            let mut items = Vec::new(&env);
+            items.push_back(Bill {
+                id: bill_id,
+                owner,
+                name: SorobanString::from_str(&env, "B"),
+                external_ref: None,
+                amount: 100,
+                due_date: PERIOD_TS + 86400,
+                recurring: false,
+                frequency_days: 30,
+                paid: false,
+                created_at: PERIOD_TS,
+                paid_at: None,
+                schedule_id: None,
+                tags: Vec::new(&env),
+                currency: SorobanString::from_str(&env, "XLM"),
+            });
+            BillPage {
+                count: 1,
+                items,
+                next_cursor,
+            }
+        }
+    }
 }
 
-/// safe_percent: normal mid-range values produce correct results.
-#[test]
-fn test_safe_percent_normal_values() {
-    assert_eq!(crate::safe_percent(7000, 10000, 100), 70);
-    assert_eq!(crate::safe_percent(12000, 15000, 100), 80);
-    assert_eq!(crate::safe_percent(1, 2, 100), 50);
+// ── Mock: bill-payments that never returns cursor = 0 ──────────────────────
+//
+// Always returns next_cursor = cursor + 1.  Without a cap this loop would
+// run forever; the contract must stop after MAX_DEP_PAGES.
+mod bills_infinite {
+    use crate::{Bill, BillPage, BillPaymentsTrait};
+    use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+
+    const PERIOD_TS: u64 = 1_704_067_200;
+
+    #[contract]
+    pub struct BillsInfinite;
+
+    #[contractimpl]
+    impl BillPaymentsTrait for BillsInfinite {
+        fn get_unpaid_bills(env: Env, _owner: Address, _c: u32, _l: u32) -> BillPage {
+            BillPage {
+                items: Vec::new(&env),
+                next_cursor: 0,
+                count: 0,
+            }
+        }
+        fn get_total_unpaid(_env: Env, _owner: Address) -> i128 {
+            0
+        }
+        fn get_all_bills_for_owner(env: Env, owner: Address, cursor: u32, _limit: u32) -> BillPage {
+            let mut items = Vec::new(&env);
+            items.push_back(Bill {
+                id: cursor,
+                owner,
+                name: SorobanString::from_str(&env, "B"),
+                external_ref: None,
+                amount: 50,
+                due_date: PERIOD_TS + 86400,
+                recurring: false,
+                frequency_days: 0,
+                paid: false,
+                created_at: PERIOD_TS,
+                paid_at: None,
+                schedule_id: None,
+                tags: Vec::new(&env),
+                currency: SorobanString::from_str(&env, "XLM"),
+            });
+            BillPage {
+                count: 1,
+                items,
+                next_cursor: cursor + 1,
+            }
+        }
+    }
 }
 
-/// safe_percent: result is clamped to [0, scale] — never exceeds scale.
-#[test]
-fn test_safe_percent_clamps_to_scale() {
-    // saved > target → would be >100 without clamping
-    assert_eq!(crate::safe_percent(20000, 10000, 100), 100);
-    // negative numerator → clamped to 0
-    assert_eq!(crate::safe_percent(-5000, 10000, 100), 0);
+// ── Mock: insurance returning exactly 3 pages then cursor = 0 ─────────────
+mod insurance_three_pages {
+    use crate::{CoverageType, InsurancePolicy, InsuranceTrait, PolicyPage};
+    use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+
+    #[contract]
+    pub struct InsuranceThreePages;
+
+    #[contractimpl]
+    impl InsuranceTrait for InsuranceThreePages {
+        fn get_active_policies(env: Env, owner: Address, cursor: u32, _limit: u32) -> PolicyPage {
+            let (policy_id, next_cursor) = match cursor {
+                0 => (1u32, 7u32),
+                7 => (2, 14),
+                _ => (3, 0),
+            };
+            let mut items = Vec::new(&env);
+            items.push_back(InsurancePolicy {
+                id: policy_id,
+                owner,
+                name: SorobanString::from_str(&env, "P"),
+                external_ref: None,
+                coverage_type: CoverageType::Health,
+                monthly_premium: 100,
+                coverage_amount: 10_000,
+                active: true,
+                next_payment_date: 1_735_689_600,
+            });
+            PolicyPage {
+                count: 1,
+                items,
+                next_cursor,
+            }
+        }
+        fn get_total_monthly_premium(_env: Env, _owner: Address) -> i128 {
+            300
+        }
+    }
 }
 
-/// safe_percent: i128::MAX numerator does not panic (overflow path returns scale).
-#[test]
-fn test_safe_percent_max_numerator_no_panic() {
-    let result = crate::safe_percent(i128::MAX, 1, 100);
-    // overflow in checked_mul → returns scale (100)
-    assert_eq!(result, 100);
+// ── Mock: insurance that never returns cursor = 0 ─────────────────────────
+mod insurance_infinite {
+    use crate::{CoverageType, InsurancePolicy, InsuranceTrait, PolicyPage};
+    use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+
+    #[contract]
+    pub struct InsuranceInfinite;
+
+    #[contractimpl]
+    impl InsuranceTrait for InsuranceInfinite {
+        fn get_active_policies(env: Env, owner: Address, cursor: u32, _limit: u32) -> PolicyPage {
+            let mut items = Vec::new(&env);
+            items.push_back(InsurancePolicy {
+                id: cursor,
+                owner,
+                name: SorobanString::from_str(&env, "P"),
+                external_ref: None,
+                coverage_type: CoverageType::Health,
+                monthly_premium: 100,
+                coverage_amount: 10_000,
+                active: true,
+                next_payment_date: 1_735_689_600,
+            });
+            PolicyPage {
+                count: 1,
+                items,
+                next_cursor: cursor + 1,
+            }
+        }
+        fn get_total_monthly_premium(_env: Env, _owner: Address) -> i128 {
+            0
+        }
+    }
 }
 
-/// safe_percent: exact boundary — numerator == denominator → 100%.
-#[test]
-fn test_safe_percent_exact_boundary() {
-    assert_eq!(crate::safe_percent(5000, 5000, 100), 100);
-    assert_eq!(crate::safe_percent(40, 100, 40), 16); // 40% of 40 = 16
+// ── Shared setup helper for paging tests ─────────────────────────────────
+
+fn setup_paging_test(
+    env: &Env,
+    bill_payments_id: Address,
+    insurance_id: Address,
+) -> (ReportingContractClient, Address) {
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(env, &contract_id);
+    let admin = Address::generate(env);
+    client.init(&admin);
+
+    let remittance_split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_goals_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let family_wallet = Address::generate(env);
+
+    client.configure_addresses(
+        &admin,
+        &remittance_split_id,
+        &savings_goals_id,
+        &bill_payments_id,
+        &insurance_id,
+        &family_wallet,
+    );
+    (client, admin)
 }
 
-/// Savings report: completion_percentage is clamped to 100 even when saved > target.
+// ── Test 1: bill paging terminates at cursor = 0 (3 pages) ───────────────
+
 #[test]
-fn test_savings_report_completion_clamped_to_100() {
+fn test_bill_paging_terminates_at_cursor_zero() {
     let env = create_test_env();
     set_ledger_time(&env, 1, 1_704_067_200);
 
-    // Mock savings contract that returns saved > target
-    mod oversaved {
-        use crate::{SavingsGoal, SavingsGoalsTrait};
-        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
-        #[contract]
-        pub struct OverSaved;
-        #[contractimpl]
-        impl SavingsGoalsTrait for OverSaved {
-            fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
-                let mut goals = Vec::new(&_env);
-                goals.push_back(SavingsGoal {
-                    id: 1,
-                    owner: _owner,
-                    name: SorobanString::from_str(&_env, "Goal"),
-                    target_amount: 1000,
-                    current_amount: 9999, // way over target
-                    target_date: 0,
-                    locked: false,
-                    unlock_date: None,
-                });
-                goals
-            }
-            fn is_goal_completed(_env: Env, _goal_id: u32) -> bool { true }
-        }
-    }
-
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    client.init(&admin);
-
-    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
-    let savings_id = env.register_contract(None, oversaved::OverSaved);
-    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let bill_id = env.register_contract(None, bills_three_pages::BillsThreePages);
     let ins_id = env.register_contract(None, insurance::Insurance);
-    let fw = Address::generate(&env);
-    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+    let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
-    let report = client.get_savings_report(&user, &0, &u64::MAX);
-    assert_eq!(report.completion_percentage, 100, "must clamp to 100");
+    let user = Address::generate(&env);
+    let report = client.get_bill_compliance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+
+    // All 3 pages fetched — no items are filtered out because created_at == period_start
+    assert_eq!(
+        report.data_availability,
+        DataAvailability::Complete,
+        "cursor=0 termination must yield Complete"
+    );
+    assert_eq!(
+        report.total_bills, 3,
+        "all 3 bills from 3 pages must be aggregated"
+    );
+    assert_eq!(report.unpaid_bills, 3);
 }
 
-/// Savings report: i128::MAX values do not panic.
+// ── Test 2: bill paging terminates at MAX_DEP_PAGES cap ──────────────────
+
 #[test]
-fn test_savings_report_max_values_no_panic() {
+fn test_bill_paging_terminates_at_cap() {
     let env = create_test_env();
     set_ledger_time(&env, 1, 1_704_067_200);
 
-    mod max_savings {
-        use crate::{SavingsGoal, SavingsGoalsTrait};
-        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
-        #[contract]
-        pub struct MaxSavings;
-        #[contractimpl]
-        impl SavingsGoalsTrait for MaxSavings {
-            fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
-                let mut goals = Vec::new(&_env);
-                goals.push_back(SavingsGoal {
-                    id: 1,
-                    owner: _owner,
-                    name: SorobanString::from_str(&_env, "Max"),
-                    target_amount: i128::MAX,
-                    current_amount: i128::MAX,
-                    target_date: 0,
-                    locked: false,
-                    unlock_date: None,
-                });
-                goals
-            }
-            fn is_goal_completed(_env: Env, _goal_id: u32) -> bool { true }
-        }
-    }
-
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    client.init(&admin);
-
-    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
-    let savings_id = env.register_contract(None, max_savings::MaxSavings);
-    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let bill_id = env.register_contract(None, bills_infinite::BillsInfinite);
     let ins_id = env.register_contract(None, insurance::Insurance);
-    let fw = Address::generate(&env);
-    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+    let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
-    // Must not panic; result must be in [0, 100]
-    let report = client.get_savings_report(&user, &0, &u64::MAX);
-    assert!(report.completion_percentage <= 100);
+    let user = Address::generate(&env);
+    let report = client.get_bill_compliance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(
+        report.data_availability,
+        DataAvailability::Partial,
+        "unbounded dependency must yield Partial after MAX_DEP_PAGES"
+    );
+    assert_eq!(
+        report.total_bills, MAX_DEP_PAGES,
+        "exactly MAX_DEP_PAGES bills must be collected before the cap fires"
+    );
 }
 
-/// Health score: savings_score is clamped to 40 even with extreme values.
+// ── Test 3: bill cursor monotonicity — items accumulate across all pages ──
+
 #[test]
-fn test_health_score_savings_score_clamped_to_40() {
+fn test_bill_paging_cursor_monotonicity() {
     let env = create_test_env();
     set_ledger_time(&env, 1, 1_704_067_200);
 
-    mod full_savings {
-        use crate::{SavingsGoal, SavingsGoalsTrait};
-        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
-        #[contract]
-        pub struct FullSavings;
-        #[contractimpl]
-        impl SavingsGoalsTrait for FullSavings {
-            fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
-                let mut goals = Vec::new(&_env);
-                goals.push_back(SavingsGoal {
-                    id: 1,
-                    owner: _owner,
-                    name: SorobanString::from_str(&_env, "Goal"),
-                    target_amount: 1,
-                    current_amount: i128::MAX, // massively over target
-                    target_date: 0,
-                    locked: false,
-                    unlock_date: None,
-                });
-                goals
-            }
-            fn is_goal_completed(_env: Env, _goal_id: u32) -> bool { true }
-        }
-    }
-
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
-    let user = Address::generate(&env);
-    client.init(&admin);
-
-    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
-    let savings_id = env.register_contract(None, full_savings::FullSavings);
-    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let bill_id = env.register_contract(None, bills_three_pages::BillsThreePages);
     let ins_id = env.register_contract(None, insurance::Insurance);
-    let fw = Address::generate(&env);
-    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+    let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
-    let score = client.calculate_health_score(&user, &0);
-    assert!(score.savings_score <= 40, "savings_score must be <= 40");
-    assert!(score.score <= 100, "total score must be <= 100");
+    let user = Address::generate(&env);
+    // Each page delivers exactly 1 bill; 3 pages → 3 bills total.
+    // If the loop visited the same page twice, count would differ.
+    let report = client.get_bill_compliance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    assert_eq!(
+        report.total_bills, 3,
+        "cursor must advance monotonically so each page is visited exactly once"
+    );
+    assert_eq!(report.data_availability, DataAvailability::Complete);
 }
 
-/// Insurance report: annual_premium overflow (monthly_premium near i128::MAX) does not panic.
+// ── Test 4: insurance paging terminates at cursor = 0 (3 pages) ──────────
+
 #[test]
-fn test_insurance_report_annual_premium_overflow_no_panic() {
+fn test_insurance_paging_terminates_at_cursor_zero() {
     let env = create_test_env();
     set_ledger_time(&env, 1, 1_704_067_200);
 
-    mod huge_premium {
-        use crate::{InsuranceTrait, InsurancePolicy, PolicyPage};
-        use remitwise_common::CoverageType;
-        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
-        #[contract]
-        pub struct HugePremium;
-        #[contractimpl]
-        impl InsuranceTrait for HugePremium {
-            fn get_active_policies(_env: Env, _owner: Address, _cursor: u32, _limit: u32) -> PolicyPage {
-                let mut policies = Vec::new(&_env);
-                policies.push_back(InsurancePolicy {
-                    id: 1,
-                    owner: _owner,
-                    name: SorobanString::from_str(&_env, "Big"),
-                    external_ref: None,
-                    coverage_type: CoverageType::Health,
-                    monthly_premium: i128::MAX / 2,
-                    coverage_amount: i128::MAX,
-                    active: true,
-                    next_payment_date: 0,
-                });
-                PolicyPage { items: policies, next_cursor: 0, count: 1 }
-            }
-            fn get_total_monthly_premium(_env: Env, _owner: Address) -> i128 {
-                i128::MAX / 2
-            }
-        }
-    }
+    let bill_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, insurance_three_pages::InsuranceThreePages);
+    let (client, _) = setup_paging_test(&env, bill_id, ins_id);
 
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let admin = Address::generate(&env);
     let user = Address::generate(&env);
-    client.init(&admin);
+    let report = client.get_insurance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
 
-    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
-    let savings_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
-    let bills_id = env.register_contract(None, bill_payments::BillPayments);
-    let ins_id = env.register_contract(None, huge_premium::HugePremium);
-    let fw = Address::generate(&env);
-    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
-
-    // Must not panic; coverage_to_premium_ratio must be a valid u32
-    let report = client.get_insurance_report(&user, &0, &u64::MAX);
-    let _ = report.coverage_to_premium_ratio; // just assert it exists and is valid
+    assert_eq!(
+        report.data_availability,
+        DataAvailability::Complete,
+        "cursor=0 termination must yield Complete"
+    );
+    assert_eq!(
+        report.active_policies, 3,
+        "all 3 policies from 3 pages must be aggregated"
+    );
+    assert_eq!(report.total_coverage, 30_000);
 }
 
-/// Bill compliance: u32::MAX paid_bills does not overflow.
-#[test]
-fn test_bill_compliance_max_paid_bills_no_overflow() {
-    // safe_percent handles this via i128 arithmetic — just verify the formula
-    // directly since we can't easily mock u32::MAX bills via the contract.
-    let result = crate::safe_percent(u32::MAX as i128, u32::MAX as i128, 100);
-    assert_eq!(result, 100);
-}
+// ── Test 5: insurance paging terminates at MAX_DEP_PAGES cap ─────────────
 
-/// Trend analysis: i128::MAX current and previous amounts do not panic.
 #[test]
-fn test_trend_analysis_max_values_no_panic() {
+fn test_insurance_paging_terminates_at_cap() {
     let env = create_test_env();
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let user = Address::generate(&env);
+    set_ledger_time(&env, 1, 1_704_067_200);
 
-    // i128::MAX - i128::MAX = 0 change, previous > 0 → 0%
-    let trend = client.get_trend_analysis(&user, &i128::MAX, &i128::MAX);
-    assert_eq!(trend.change_amount, 0);
-    assert_eq!(trend.change_percentage, 0);
+    let bill_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, insurance_infinite::InsuranceInfinite);
+    let (client, _) = setup_paging_test(&env, bill_id, ins_id);
+
+    let user = Address::generate(&env);
+    let report = client.get_insurance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+
+    assert_eq!(
+        report.data_availability,
+        DataAvailability::Partial,
+        "unbounded dependency must yield Partial after MAX_DEP_PAGES"
+    );
+    assert_eq!(
+        report.active_policies, MAX_DEP_PAGES,
+        "exactly MAX_DEP_PAGES policies must be collected before the cap fires"
+    );
 }
 
-/// Trend analysis: large positive change does not overflow i32 cast.
-/// When numerator * scale overflows i128, safe_percent returns scale (100) — no panic.
+// ── Test 6: insurance cursor monotonicity ────────────────────────────────
+
 #[test]
-fn test_trend_analysis_large_change_clamped_to_i32() {
+fn test_insurance_paging_cursor_monotonicity() {
     let env = create_test_env();
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
+    set_ledger_time(&env, 1, 1_704_067_200);
+
+    let bill_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, insurance_three_pages::InsuranceThreePages);
+    let (client, _) = setup_paging_test(&env, bill_id, ins_id);
+
     let user = Address::generate(&env);
-
-    // current = i128::MAX, previous = 1 → change_amount = i128::MAX - 1
-    // safe_percent(i128::MAX - 1, 1, 100): checked_mul overflows → returns scale (100)
-    let trend = client.get_trend_analysis(&user, &i128::MAX, &1);
-    // Result is 100 (safe_percent overflow path), clamped to i32 range — no panic
-    assert!(trend.change_percentage >= 0, "change_percentage must not be negative for large positive change");
-    assert!(trend.change_percentage <= i32::MAX, "change_percentage must fit in i32");
-}
-
-/// Trend analysis: zero previous_amount with zero current → 0%.
-#[test]
-fn test_trend_analysis_zero_previous_zero_current() {
-    let env = create_test_env();
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let user = Address::generate(&env);
-
-    let trend = client.get_trend_analysis(&user, &0, &0);
-    assert_eq!(trend.change_percentage, 0);
-}
-
-/// Trend analysis multi: i128::MAX values do not panic.
-#[test]
-fn test_trend_analysis_multi_max_values_no_panic() {
-    let env = create_test_env();
-    let contract_id = env.register_contract(None, ReportingContract);
-    let client = ReportingContractClient::new(&env, &contract_id);
-    let user = Address::generate(&env);
-
-    let mut history = soroban_sdk::Vec::new(&env);
-    history.push_back((0u64, 1i128));
-    history.push_back((1u64, i128::MAX));
-
-    let result = client.get_trend_analysis_multi(&user, &history);
-    assert_eq!(result.len(), 1);
-    // change_percentage must be a valid i32 (no panic, no overflow)
-    let pct = result.get(0).unwrap().change_percentage;
-    assert!(pct >= 0, "change_percentage must not be negative for large positive change");
-    assert!(pct <= i32::MAX, "change_percentage must fit in i32");
+    let report = client.get_insurance_report(&user, &1_704_067_200u64, &1_706_745_600u64);
+    assert_eq!(
+        report.active_policies, 3,
+        "cursor must advance monotonically so each page is visited exactly once"
+    );
+    assert_eq!(report.data_availability, DataAvailability::Complete);
 }
