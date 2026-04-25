@@ -3,7 +3,7 @@
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    Address, Env, IntoVal, String, Symbol, TryFromVal, Val, Vec as SorobanVec,
+    Address, Env, String, Symbol, TryFromVal, Val, Vec as SorobanVec,
 };
 
 fn setup_test(env: &Env) -> (SavingsGoalContractClient, Address) {
@@ -13,10 +13,6 @@ fn setup_test(env: &Env) -> (SavingsGoalContractClient, Address) {
     env.mock_all_auths();
     client.init();
     (client, user)
-}
-
-fn last_event(env: &Env) -> (Address, SorobanVec<Val>, Val) {
-    env.events().all().last().expect("No events emitted")
 }
 
 fn get_remitwise_events(env: &Env, action: Symbol) -> SorobanVec<(Address, SorobanVec<Val>, Val)> {

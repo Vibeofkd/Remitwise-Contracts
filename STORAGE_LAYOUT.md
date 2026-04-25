@@ -77,7 +77,7 @@ cargo test --package testutils storage_key_naming_test -- --nocapture
 - TTL bumps on mutating flows via `extend_instance_ttl`.
 - Schedule IDs allocate from `NEXT_RSCH` (`0 -> 1 -> 2 ...`).
 
-## savings_goals
+### Savings Goals Storage (Scalable DataKey Pattern)
 
 ### Keys and value types (instance storage)
 
@@ -96,7 +96,6 @@ cargo test --package testutils storage_key_naming_test -- --nocapture
 | `UPG_ADM`   | `Address`                   | Upgrade admin                          |
 | `VERSION`   | `u32`                       | Contract version                       |
 
-### Keys and value types (persistent storage)
 
 | Key       | Type                    | Notes                           |
 | --------- | ----------------------- | ------------------------------- |
