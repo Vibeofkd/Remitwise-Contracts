@@ -193,6 +193,8 @@ macro_rules! mock_bills {
                             schedule_id: None,
                             tags: Vec::new(&env),
                             currency: SorobanString::from_str(&env, "USDC"),
+                            external_ref: None,
+                            tags: Vec::new(&env),
                         });
                     }
                     let count = items.len();
@@ -231,6 +233,8 @@ macro_rules! mock_bills {
                             schedule_id: None,
                             tags: Vec::new(&env),
                             currency: SorobanString::from_str(&env, "USDC"),
+                            external_ref: None,
+                            tags: Vec::new(&env),
                         });
                     }
                     let count = items.len();
@@ -269,12 +273,12 @@ macro_rules! mock_insurance {
                             id: i,
                             owner: owner.clone(),
                             name: SorobanString::from_str(&env, "Bench Policy"),
-                            external_ref: None,
-                            coverage_type: CoverageType::Health,
+                            coverage_type: remitwise_common::CoverageType::Health,
                             monthly_premium: 200i128,
                             coverage_amount: 50_000i128,
                             active: true,
                             next_payment_date: 1_800_000_000,
+                            external_ref: None,
                         });
                     }
                     let count = items.len();

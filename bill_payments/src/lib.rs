@@ -18,6 +18,11 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// Maximum length for currency codes (ISO 4217 is 3 letters)
 const MAX_CURRENCY_LEN: u32 = 10;
 
+/// Minimum length for external reference strings
+const MIN_EXTERNAL_REF_LEN: u32 = 1;
+/// Maximum length for external reference strings
+const MAX_EXTERNAL_REF_LEN: u32 = 64;
+
 /// Validates that a currency string contains only ASCII alphabetic characters.
 /// Returns true if the string is valid (all ASCII letters A-Z or a-z).
 fn is_valid_currency_chars(s: &[u8]) -> bool {
@@ -67,6 +72,7 @@ pub mod pause_functions {
 }
 
 const STORAGE_UNPAID_TOTALS: Symbol = symbol_short!("UNPD_TOT");
+const STORAGE_EXT_REF_IDX: Symbol = symbol_short!("EXTRIDX");
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -102,6 +108,10 @@ pub enum BillPaymentsError {
     EmptyTags = 14,
     /// Currency code is invalid (empty, too long, or contains non-alphanumeric)
     InvalidCurrency = 15,
+    /// External reference is invalid (empty, too long, or contains disallowed chars)
+    InvalidExternalRef = 16,
+    /// External reference already used by another active bill for this owner
+    DuplicateExternalRef = 17,
 }
 
 // Back-compat alias: large parts of this crate (and tests) still refer to `Error`.
@@ -240,6 +250,99 @@ impl BillPayments {
         match Self::validate_and_normalize_currency(env, currency) {
             Ok(normalized) => normalized,
             Err(_) => String::from_str(env, "XLM"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // external_ref validation & per-owner uniqueness index
+    // -----------------------------------------------------------------------
+
+    /// Validate an `external_ref` string.
+    ///
+    /// Allowed characters: ASCII alphanumeric, hyphens, underscores, dots, colons.
+    /// Length must be within `[MIN_EXTERNAL_REF_LEN, MAX_EXTERNAL_REF_LEN]`.
+    fn validate_external_ref(
+        env: &Env,
+        ext_ref: &String,
+    ) -> Result<String, BillPaymentsError> {
+        let len = ext_ref.len();
+        if len < MIN_EXTERNAL_REF_LEN || len > MAX_EXTERNAL_REF_LEN {
+            return Err(BillPaymentsError::InvalidExternalRef);
+        }
+
+        let mut buf = [0u8; 64];
+        let copy_len = (len as usize).min(buf.len());
+        ext_ref.copy_into_slice(&mut buf[..copy_len]);
+        let s = &buf[..copy_len];
+
+        for &b in s {
+            if !(b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b':') {
+                return Err(BillPaymentsError::InvalidExternalRef);
+            }
+        }
+
+        // Return as-is (case-sensitive for reconciliation fidelity)
+        Ok(ext_ref.clone())
+    }
+
+    /// Optionally validate an external_ref. `None` passes through.
+    fn validate_optional_external_ref(
+        env: &Env,
+        ext_ref: &Option<String>,
+    ) -> Result<Option<String>, BillPaymentsError> {
+        match ext_ref {
+            None => Ok(None),
+            Some(r) => Ok(Some(Self::validate_external_ref(env, r)?)),
+        }
+    }
+
+    /// Load the owner-scoped external_ref index: `Map<Address, Map<String, u32>>`
+    fn get_ext_ref_index(env: &Env) -> Map<Address, Map<String, u32>> {
+        env.storage()
+            .instance()
+            .get(&STORAGE_EXT_REF_IDX)
+            .unwrap_or_else(|| Map::new(env))
+    }
+
+    fn save_ext_ref_index(env: &Env, idx: &Map<Address, Map<String, u32>>) {
+        env.storage()
+            .instance()
+            .set(&STORAGE_EXT_REF_IDX, idx);
+    }
+
+    /// Claim `ext_ref` for `owner` → `bill_id`. Fails if already claimed by another bill.
+    fn claim_external_ref(
+        env: &Env,
+        owner: &Address,
+        ext_ref: &String,
+        bill_id: u32,
+    ) -> Result<(), BillPaymentsError> {
+        let mut idx = Self::get_ext_ref_index(env);
+        let mut owner_map: Map<String, u32> = idx
+            .get(owner.clone())
+            .unwrap_or_else(|| Map::new(env));
+
+        if let Some(existing_id) = owner_map.get(ext_ref.clone()) {
+            if existing_id != bill_id {
+                return Err(BillPaymentsError::DuplicateExternalRef);
+            }
+            // Same bill re-claiming its own ref — no-op
+            return Ok(());
+        }
+
+        owner_map.set(ext_ref.clone(), bill_id);
+        idx.set(owner.clone(), owner_map);
+        Self::save_ext_ref_index(env, &idx);
+        Ok(())
+    }
+
+    /// Release a previously claimed `ext_ref` for `owner`.
+    fn release_external_ref(env: &Env, owner: &Address, ext_ref: &String) {
+        let mut idx = Self::get_ext_ref_index(env);
+        if let Some(mut owner_map) = idx.get(owner.clone()) {
+            owner_map.remove(ext_ref.clone());
+            idx.set(owner.clone(), owner_map);
+            Self::save_ext_ref_index(env, &idx);
         }
     }
 
@@ -588,6 +691,9 @@ impl BillPayments {
         // Validate and normalize currency (strict validation - rejects invalid codes)
         let resolved_currency = Self::validate_and_normalize_currency(&env, &currency)?;
 
+        // Validate external_ref if provided
+        let validated_ext_ref = Self::validate_optional_external_ref(&env, &external_ref)?;
+
         Self::extend_instance_ttl(&env);
         let mut bills: Map<u32, Bill> = env
             .storage()
@@ -602,13 +708,18 @@ impl BillPayments {
             .unwrap_or(0u32)
             + 1;
 
+        // Enforce uniqueness for external_ref if provided
+        if let Some(ref r) = validated_ext_ref {
+            Self::claim_external_ref(&env, &owner, r, next_id)?;
+        }
+
         let current_time = env.ledger().timestamp();
-        let bill_external_ref = external_ref.clone();
+        let bill_external_ref = validated_ext_ref.clone();
         let bill = Bill {
             id: next_id,
             owner: owner.clone(),
             name: name.clone(),
-            external_ref,
+            external_ref: validated_ext_ref,
             amount,
             due_date,
             recurring,
@@ -622,6 +733,7 @@ impl BillPayments {
         };
 
         let bill_owner = bill.owner.clone();
+        let bill_ext_ref = bill.external_ref.clone();
         bills.set(next_id, bill);
         env.storage()
             .instance()
@@ -634,7 +746,7 @@ impl BillPayments {
         // Emit event for audit trail
         env.events().publish(
             (symbol_short!("bill"), BillEvent::Created),
-            (next_id, bill_owner.clone(), bill_external_ref),
+            (next_id, bill_owner.clone(), bill_ext_ref),
         );
         RemitwiseEvents::emit(
             &env,
@@ -692,7 +804,7 @@ impl BillPayments {
                 id: next_id,
                 owner: bill.owner.clone(),
                 name: bill.name.clone(),
-                external_ref: bill.external_ref.clone(),
+                external_ref: None, // Do not clone ref to avoid uniqueness conflict
                 amount: bill.amount,
                 due_date: next_due_date,
                 recurring: true,
@@ -712,6 +824,7 @@ impl BillPayments {
 
         let paid_amount = bill.amount;
         let was_recurring = bill.recurring;
+        let bill_ext_ref = bill.external_ref.clone();
         bills.set(bill_id, bill);
         env.storage()
             .instance()
@@ -719,11 +832,9 @@ impl BillPayments {
         if !was_recurring {
             Self::adjust_unpaid_total(&env, &caller, -paid_amount);
         }
-
-        // Emit event for audit trail
         env.events().publish(
             (symbol_short!("bill"), BillEvent::Paid),
-            (bill_id, caller.clone(), bill_external_ref),
+            (bill_id, caller.clone(), bill_ext_ref),
         );
         RemitwiseEvents::emit(
             &env,
@@ -764,6 +875,7 @@ impl BillPayments {
     /// Results are always ordered by bill ID ascending. Pagination uses the same
     /// ordering, so `cursor` is stable across repeated calls.
     pub fn get_unpaid_bills(env: Env, owner: Address, cursor: u32, limit: u32) -> BillPage {
+        owner.require_auth();
         let limit = clamp_limit(limit);
         let bills: Map<u32, Bill> = env
             .storage()
@@ -961,6 +1073,9 @@ impl BillPayments {
     ) -> Result<(), BillPaymentsError> {
         caller.require_auth();
 
+        // Validate the new ref if provided
+        let validated_ext_ref = Self::validate_optional_external_ref(&env, &external_ref)?;
+
         Self::extend_instance_ttl(&env);
         let mut bills: Map<u32, Bill> = env
             .storage()
@@ -973,7 +1088,19 @@ impl BillPayments {
             return Err(BillPaymentsError::Unauthorized);
         }
 
-        bill.external_ref = external_ref.clone();
+        // Handle index updates
+        if bill.external_ref != validated_ext_ref {
+            // Release old ref if it existed
+            if let Some(ref old_ref) = bill.external_ref {
+                Self::release_external_ref(&env, &caller, old_ref);
+            }
+            // Claim new ref if provided
+            if let Some(ref new_ref) = validated_ext_ref {
+                Self::claim_external_ref(&env, &caller, new_ref, bill_id)?;
+            }
+        }
+
+        bill.external_ref = validated_ext_ref.clone();
         bills.set(bill_id, bill);
         env.storage()
             .instance()
@@ -984,7 +1111,7 @@ impl BillPayments {
             EventCategory::State,
             EventPriority::Medium,
             symbol_short!("ext_ref"),
-            (bill_id, caller, external_ref),
+            (bill_id, caller, validated_ext_ref),
         );
 
         Ok(())
@@ -1108,6 +1235,82 @@ impl BillPayments {
         }
     }
 
+    /// Returns a page of archived bills for `owner` using the `ARCH_IDX` per-owner index.
+    ///
+    /// # Parameters
+    /// - `owner`: The address whose archived bills are queried.
+    /// - `cursor`: Exclusive lower bound on bill ID. Pass `0` to start from the beginning.
+    ///   The next page starts after the last returned ID (use `next_cursor` from the previous page).
+    /// - `limit`: Maximum items to return per page. `0` defaults to `DEFAULT_PAGE_LIMIT` (20).
+    ///   Values above `MAX_PAGE_LIMIT` (50) are clamped to `MAX_PAGE_LIMIT`.
+    ///
+    /// # Returns
+    /// `ArchivedBillPage` with:
+    /// - `items`: Up to `clamp_limit(limit)` archived bills in strictly ascending bill ID order.
+    /// - `next_cursor`: ID of the last item on this page if more pages exist; `0` if this is the last page.
+    /// - `count`: Number of items in `items`.
+    ///
+    /// # Ordering
+    /// Items are returned in strictly ascending bill ID order, matching the order maintained in `ARCH_IDX`.
+    ///
+    /// # Gas Complexity
+    /// O(clamp_limit(limit)) `ARCH_BILL` map lookups regardless of total archive size, because
+    /// only the owner's index entry is read rather than scanning the full `ARCH_BILL` map.
+    pub fn get_archived_bills_page(
+        env: Env,
+        owner: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> ArchivedBillPage {
+        let effective_limit = clamp_limit(limit);
+        let archived: Map<u32, ArchivedBill> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_BILL"))
+            .unwrap_or_else(|| Map::new(&env));
+
+        let ids = Self::get_owner_index(&env, &owner);
+        let mut items: Vec<ArchivedBill> = Vec::new(&env);
+
+        for id in ids.iter() {
+            if id <= cursor {
+                continue;
+            }
+            if let Some(bill) = archived.get(id) {
+                items.push_back(bill);
+            }
+            if items.len() > effective_limit {
+                break;
+            }
+        }
+
+        let has_next = items.len() > effective_limit;
+        let mut next_cursor: u32 = 0;
+
+        if has_next {
+            // next_cursor = last item on the current page (before truncation)
+            let last_idx = effective_limit - 1;
+            if let Some(bill) = items.get(last_idx) {
+                next_cursor = bill.id;
+            }
+            // Truncate to effective_limit
+            let mut truncated: Vec<ArchivedBill> = Vec::new(&env);
+            for i in 0..effective_limit {
+                if let Some(bill) = items.get(i) {
+                    truncated.push_back(bill);
+                }
+            }
+            items = truncated;
+        }
+
+        let count = items.len();
+        ArchivedBillPage {
+            items,
+            next_cursor,
+            count,
+        }
+    }
+
     pub fn get_archived_bill(env: Env, bill_id: u32) -> Option<ArchivedBill> {
         let archived: Map<u32, ArchivedBill> = env
             .storage()
@@ -1133,6 +1336,12 @@ impl BillPayments {
         if bill.owner != caller {
             return Err(BillPaymentsError::Unauthorized);
         }
+
+        // Release external_ref if it exists
+        if let Some(ref r) = bill.external_ref {
+            Self::release_external_ref(&env, &caller, r);
+        }
+
         let removed_unpaid_amount = if bill.paid { 0 } else { bill.amount };
         bills.remove(bill_id);
         env.storage()
@@ -1185,19 +1394,27 @@ impl BillPayments {
 
         for (id, bill) in bills.iter() {
             if let Some(paid_at) = bill.paid_at {
-                if bill.paid && paid_at < before_timestamp {
-                    let archived_bill = ArchivedBill {
-                        id: bill.id,
-                        owner: bill.owner.clone(),
-                        name: bill.name.clone(),
-                        external_ref: bill.external_ref.clone(),
-                        amount: bill.amount,
-                        paid_at,
-                        archived_at: current_time,
-                        tags: bill.tags.clone(),
-                        currency: bill.currency.clone(),
-                    };
+                    if bill.paid && paid_at < before_timestamp {
+                        // Release external_ref from the active index during archival
+                        if let Some(ref r) = bill.external_ref {
+                            Self::release_external_ref(&env, &bill.owner, r);
+                        }
+
+                        let archived_bill = ArchivedBill {
+                            id: bill.id,
+                            owner: bill.owner.clone(),
+                            name: bill.name.clone(),
+                            external_ref: bill.external_ref.clone(),
+                            amount: bill.amount,
+                            paid_at,
+                            archived_at: current_time,
+                            tags: bill.tags.clone(),
+                            currency: bill.currency.clone(),
+                        };
                     archived.set(id, archived_bill);
+                    let mut owner_ids = Self::get_owner_index(&env, &bill.owner);
+                    owner_ids.push_back(id);
+                    Self::set_owner_index(&env, &bill.owner, owner_ids);
                     to_remove.push_back(id);
                     archived_count += 1;
                 }
@@ -1229,21 +1446,27 @@ impl BillPayments {
     }
 
     pub fn restore_bill(env: Env, caller: Address, bill_id: u32) -> Result<(), BillPaymentsError> {
-        caller.require_auth();
-        Self::require_not_paused(&env, pause_functions::RESTORE)?;
-        Self::extend_instance_ttl(&env);
+            caller.require_auth();
+            Self::require_not_paused(&env, pause_functions::RESTORE)?;
+            Self::extend_instance_ttl(&env);
 
-        let mut archived: Map<u32, ArchivedBill> = env
-            .storage()
-            .instance()
-            .get(&symbol_short!("ARCH_BILL"))
-            .unwrap_or_else(|| Map::new(&env));
-        let archived_bill = archived
-            .get(bill_id)
-            .ok_or(BillPaymentsError::BillNotFound)?;
+            let mut archived: Map<u32, ArchivedBill> = env
+                .storage()
+                .instance()
+                .get(&symbol_short!("ARCH_BILL"))
+                .unwrap_or_else(|| Map::new(&env));
+            let archived_bill = archived
+                .get(bill_id)
+                .ok_or(BillPaymentsError::BillNotFound)?;
 
-        if archived_bill.owner != caller {
-            return Err(BillPaymentsError::Unauthorized);
+            if archived_bill.owner != caller {
+                return Err(BillPaymentsError::Unauthorized);
+            }
+
+        // Reclaim external_ref in the active index. 
+        // Fails if another bill now uses this ref.
+        if let Some(ref r) = archived_bill.external_ref {
+            Self::claim_external_ref(&env, &caller, r, bill_id)?;
         }
 
         let mut bills: Map<u32, Bill> = env
@@ -1252,44 +1475,37 @@ impl BillPayments {
             .get(&symbol_short!("BILLS"))
             .unwrap_or_else(|| Map::new(&env));
 
-        let restored_bill = Bill {
-            id: archived_bill.id,
-            owner: archived_bill.owner.clone(),
-            name: archived_bill.name.clone(),
-            external_ref: archived_bill.external_ref.clone(),
-            amount: archived_bill.amount,
-            due_date: env.ledger().timestamp() + 2592000,
-            recurring: false,
-            frequency_days: 0,
-            paid: true,
-            created_at: archived_bill.paid_at,
-            paid_at: Some(archived_bill.paid_at),
-            schedule_id: None,
-            tags: archived_bill.tags.clone(),
-            currency: archived_bill.currency.clone(),
-        };
+            bills.set(bill_id, restored_bill);
+            archived.remove(bill_id);
 
-        bills.set(bill_id, restored_bill);
-        archived.remove(bill_id);
+            // Remove from ARCH_IDX
+            let old_ids = Self::get_owner_index(&env, &archived_bill.owner);
+            let mut new_ids: Vec<u32> = Vec::new(&env);
+            for eid in old_ids.iter() {
+                if eid != bill_id {
+                    new_ids.push_back(eid);
+                }
+            }
+            Self::set_owner_index(&env, &archived_bill.owner, new_ids);
 
-        env.storage()
-            .instance()
-            .set(&symbol_short!("BILLS"), &bills);
-        env.storage()
-            .instance()
-            .set(&symbol_short!("ARCH_BILL"), &archived);
+            env.storage()
+                .instance()
+                .set(&symbol_short!("BILLS"), &bills);
+            env.storage()
+                .instance()
+                .set(&symbol_short!("ARCH_BILL"), &archived);
 
-        Self::update_storage_stats(&env);
+            Self::update_storage_stats(&env);
 
-        RemitwiseEvents::emit(
-            &env,
-            EventCategory::State,
-            EventPriority::Medium,
-            symbol_short!("restored"),
-            bill_id,
-        );
-        Ok(())
-    }
+            RemitwiseEvents::emit(
+                &env,
+                EventCategory::State,
+                EventPriority::Medium,
+                symbol_short!("restored"),
+                bill_id,
+            );
+            Ok(())
+        }
 
     /// @notice Permanently delete archived bills with `archived_at < before_timestamp`.
     /// @dev Permissionless maintenance operation for archive compaction.
@@ -1312,17 +1528,30 @@ impl BillPayments {
             .get(&symbol_short!("ARCH_BILL"))
             .unwrap_or_else(|| Map::new(&env));
         let mut deleted_count = 0u32;
-        let mut to_remove: Vec<u32> = Vec::new(&env);
+        let mut to_remove: Vec<(u32, Address)> = Vec::new(&env);
 
         for (id, bill) in archived.iter() {
             if bill.archived_at < before_timestamp {
+                // Release external_ref if it exists
+                if let Some(ref r) = bill.external_ref {
+                    Self::release_external_ref(&env, &bill.owner, r);
+                }
                 to_remove.push_back(id);
                 deleted_count += 1;
             }
         }
 
-        for id in to_remove.iter() {
+        for (id, owner) in to_remove.iter() {
             archived.remove(id);
+            // Remove from ARCH_IDX
+            let old_ids = Self::get_owner_index(&env, &owner);
+            let mut new_ids: Vec<u32> = Vec::new(&env);
+            for eid in old_ids.iter() {
+                if eid != id {
+                    new_ids.push_back(eid);
+                }
+            }
+            Self::set_owner_index(&env, &owner, new_ids);
         }
 
         env.storage()
@@ -1437,7 +1666,7 @@ impl BillPayments {
                     id: next_id,
                     owner: bill.owner.clone(),
                     name: bill.name.clone(),
-                    external_ref: bill.external_ref.clone(),
+                    external_ref: None, // Do not clone ref to avoid uniqueness conflict
                     amount: bill.amount,
                     due_date: next_due_date,
                     recurring: true,
@@ -1621,6 +1850,7 @@ impl BillPayments {
         cursor: u32,
         limit: u32,
     ) -> BillPage {
+        owner.require_auth();
         let limit = clamp_limit(limit);
         let bills: Map<u32, Bill> = env
             .storage()
@@ -1742,6 +1972,28 @@ impl BillPayments {
     }
     fn get_unpaid_totals_map(env: &Env) -> Option<Map<Address, i128>> {
         env.storage().instance().get(&STORAGE_UNPAID_TOTALS)
+    }
+
+    /// Read the owner's archived bill ID list from ARCH_IDX.
+    /// Returns an empty Vec if no entry exists for this owner.
+    fn get_owner_index(env: &Env, owner: &Address) -> Vec<u32> {
+        let idx: Map<Address, Vec<u32>> = env
+            .storage()
+            .instance()
+            .get(&ARCH_IDX_KEY)
+            .unwrap_or_else(|| Map::new(env));
+        idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env))
+    }
+
+    /// Persist the owner's archived bill ID list back to ARCH_IDX.
+    fn set_owner_index(env: &Env, owner: &Address, ids: Vec<u32>) {
+        let mut idx: Map<Address, Vec<u32>> = env
+            .storage()
+            .instance()
+            .get(&ARCH_IDX_KEY)
+            .unwrap_or_else(|| Map::new(env));
+        idx.set(owner.clone(), ids);
+        env.storage().instance().set(&ARCH_IDX_KEY, &idx);
     }
 
     fn adjust_unpaid_total(env: &Env, owner: &Address, delta: i128) {
@@ -2092,7 +2344,7 @@ mod test {
         let owner = Address::generate(&env);
 
         setup_bills(&env, &client, &owner, 3);
-        let page = client.get_overdue_bills(&0, &10);
+        let page = client.get_overdue_bills(&owner, &0, &10);
         assert_eq!(page.count, 0);
     }
 
@@ -2128,11 +2380,11 @@ mod test {
         env.ledger().set_timestamp(25000);
 
         // Now get_overdue_bills will actually find the 6 bills
-        let page1 = client.get_overdue_bills(&0, &4);
+        let page1 = client.get_overdue_bills(&owner, &0, &4);
         assert_eq!(page1.count, 4);
         assert!(page1.next_cursor > 0);
 
-        let page2 = client.get_overdue_bills(&page1.next_cursor, &4);
+        let page2 = client.get_overdue_bills(&owner, &page1.next_cursor, &4);
         assert_eq!(page2.count, 2);
         assert_eq!(page2.next_cursor, 0);
     }
@@ -3061,7 +3313,7 @@ mod test {
             // Fast-forward to 'now' so they become overdue
             env.ledger().set_timestamp(now);
 
-            let page = client.get_overdue_bills(&0, &50);
+            let page = client.get_overdue_bills(&owner, &0, &50);
             for bill in page.items.iter() {
                 prop_assert!(bill.due_date < now, "returned bill must be past due");
             }
@@ -3097,7 +3349,7 @@ mod test {
                 );
             }
 
-            let page = client.get_overdue_bills(&0, &50);
+            let page = client.get_overdue_bills(&owner, &0, &50);
             prop_assert_eq!(
                 page.count,
                 0u32,
@@ -3260,7 +3512,7 @@ mod test {
             &String::from_str(&env, "XLM"),
         );
 
-        let page = client.get_overdue_bills(&0, &100);
+        let page = client.get_overdue_bills(&owner, &0, &100);
         assert_eq!(
             page.count, 0,
             "Bill must not appear overdue when current_time == due_date"
@@ -3290,11 +3542,11 @@ mod test {
             &String::from_str(&env, "XLM"),
         );
 
-        let page = client.get_overdue_bills(&0, &100);
+        let page = client.get_overdue_bills(&owner, &0, &100);
         assert_eq!(page.count, 0);
 
         env.ledger().set_timestamp(due_date + 1);
-        let page = client.get_overdue_bills(&0, &100);
+        let page = client.get_overdue_bills(&owner, &0, &100);
         assert_eq!(
             page.count, 1,
             "Bill must appear overdue exactly one second past due_date"
@@ -3342,7 +3594,7 @@ mod test {
         // 3. WARP to the "Present" (2,000_000)
         env.ledger().set_timestamp(2_000_000);
 
-        let page = client.get_overdue_bills(&0, &100);
+        let page = client.get_overdue_bills(&owner, &0, &100);
 
         // Now overdue_target (1.5M) is < current (2M) -> OVERDUE
         // due_now_target (2M) is NOT < current (2M) -> NOT OVERDUE
@@ -3374,11 +3626,11 @@ mod test {
             &String::from_str(&env, "XLM"),
         );
 
-        let page = client.get_overdue_bills(&0, &100);
+        let page = client.get_overdue_bills(&owner, &0, &100);
         assert_eq!(page.count, 0);
 
         env.ledger().set_timestamp(due_date + day);
-        let page = client.get_overdue_bills(&0, &100);
+        let page = client.get_overdue_bills(&owner, &0, &100);
         assert_eq!(
             page.count, 1,
             "Bill must be overdue one full day past due_date"
@@ -3615,5 +3867,156 @@ mod test {
         let admin = Address::generate(&env);
 
         client.bulk_cleanup_bills(&admin, &1000000);
+    }
+
+    #[test]
+    fn test_external_ref_validation() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Test");
+        let currency = String::from_str(&env, "XLM");
+
+        // Valid chars: alphanumeric, -, _, ., :
+        let valid_ref = String::from_str(&env, "ABC-123_abc.def:000");
+        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(valid_ref), &currency);
+        assert!(res.is_ok());
+
+        // Invalid char: space
+        let invalid_ref = String::from_str(&env, "REF 1");
+        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(invalid_ref), &currency);
+        assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
+
+        // Invalid char: @
+        let invalid_ref2 = String::from_str(&env, "ref@123");
+        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(invalid_ref2), &currency);
+        assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
+
+        // Length limits
+        let too_short = String::from_str(&env, "");
+        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(too_short), &currency);
+        assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
+
+        let too_long_str = "a".repeat(65);
+        let too_long = String::from_str(&env, &too_long_str);
+        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(too_long), &currency);
+        assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
+    }
+
+    #[test]
+    fn test_external_ref_uniqueness_per_owner() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner_a = Address::generate(&env);
+        let owner_b = Address::generate(&env);
+
+        let name = String::from_str(&env, "Test");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "REF-001");
+
+        // Owner A creates bill with REF-001
+        client.create_bill(&owner_a, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+
+        // Owner A tries to create ANOTHER bill with SAME ref -> Fails
+        let res = client.try_create_bill(&owner_a, &name, &200, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        assert_eq!(res, Err(Ok(BillPaymentsError::DuplicateExternalRef)));
+
+        // Owner B tries to create bill with SAME ref -> Success (isolated)
+        let res_b = client.try_create_bill(&owner_b, &name, &300, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        assert!(res_b.is_ok());
+    }
+
+    #[test]
+    fn test_external_ref_reuse_after_clear_or_cancel() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Test");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "REF-001");
+
+        let id1 = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+
+        // Clear ref on ID1
+        client.set_external_ref(&owner, &id1, &None);
+
+        // Now REF-001 is free
+        let id2 = client.create_bill(&owner, &name, &200, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        assert!(id2 > id1);
+
+        // Cancel ID2
+        client.cancel_bill(&owner, &id2);
+
+        // Now REF-001 is free again
+        let id3 = client.create_bill(&owner, &name, &300, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        assert!(id3 > id2);
+    }
+
+    #[test]
+    fn test_restore_conflict_fails() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Test");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "REF-001");
+
+        // 1. Create and Pay Bill 1
+        let id1 = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        client.pay_bill(&owner, &id1);
+
+        // 2. Archive Bill 1 (frees REF-001 for active bills)
+        client.archive_paid_bills(&owner, &u64::MAX);
+
+        // 3. Create Bill 2 with SAME ref
+        let _id2 = client.create_bill(&owner, &name, &200, &3000000, &false, &0, &Some(ext_ref.clone()), &currency);
+
+        // 4. Try to Restore Bill 1 -> Conflicts with Bill 2
+        let res = client.try_restore_bill(&owner, &id1);
+        assert_eq!(res, Err(Ok(BillPaymentsError::DuplicateExternalRef)));
+    }
+
+    #[test]
+    fn test_recurring_avoids_conflict_on_auto_create() {
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Recurring");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "REF-RECUR");
+
+        // Create recurring bill with ref
+        let id1 = client.create_bill(&owner, &name, &100, &2000000, &true, &30, &Some(ext_ref.clone()), &currency);
+
+        // Pay it. This creates the next instance.
+        // If we cloned the ref, it would fail.
+        client.pay_bill(&owner, &id1);
+
+        // Check the new bill
+        let id2 = 2u32;
+        let bill2 = client.get_bill(&id2).unwrap();
+        assert_eq!(bill2.external_ref, None, "Next recurring instance should have None ref to avoid conflict");
+
+        // Now we can reuse the ref if we clear it from the old one or archive it.
+        client.archive_paid_bills(&owner, &u64::MAX); // Frees the ref from id1
+
+        // Now we can set it on id2
+        client.set_external_ref(&owner, &id2, &Some(ext_ref.clone()));
+        let bill2_updated = client.get_bill(&id2).unwrap();
+        assert_eq!(bill2_updated.external_ref, Some(ext_ref));
     }
 }

@@ -114,6 +114,8 @@ mod bill_payments {
                 schedule_id: None,
                 tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
+                external_ref: None,
+                tags: Vec::new(&env),
             });
             BillPage {
                 count: bills.len(),
@@ -149,6 +151,8 @@ mod bill_payments {
                 schedule_id: None,
                 tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
+                external_ref: None,
+                tags: Vec::new(&env),
             });
             bills.push_back(Bill {
                 id: 2,
@@ -165,6 +169,8 @@ mod bill_payments {
                 schedule_id: None,
                 tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
+                external_ref: None,
+                tags: Vec::new(&env),
             });
             BillPage {
                 count: bills.len(),
@@ -176,7 +182,8 @@ mod bill_payments {
 }
 
 mod insurance {
-    use crate::{CoverageType, InsurancePolicy, InsuranceTrait};
+    use crate::{InsurancePolicy, InsuranceTrait};
+    use remitwise_common::CoverageType;
     use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
 
     #[contract]
@@ -185,23 +192,22 @@ mod insurance {
     #[contractimpl]
     impl InsuranceTrait for Insurance {
         fn get_active_policies(
-            _env: Env,
+            env: Env,
             _owner: Address,
             _cursor: u32,
             _limit: u32,
         ) -> crate::PolicyPage {
-            let env = _env;
             let mut policies = Vec::new(&env);
             policies.push_back(InsurancePolicy {
                 id: 1,
                 owner: _owner,
                 name: SorobanString::from_str(&env, "Health Insurance"),
-                external_ref: None,
                 coverage_type: CoverageType::Health,
                 monthly_premium: 200,
                 coverage_amount: 50000,
                 active: true,
                 next_payment_date: 1735689600,
+                external_ref: None,
             });
             crate::PolicyPage {
                 items: policies,
@@ -453,7 +459,7 @@ fn test_verify_dependency_address_set_rejects_self_reference() {
         savings_goals: Address::generate(&env),
         bill_payments: Address::generate(&env),
         insurance: Address::generate(&env),
-        family_wallet: contract_id.clone(),
+        family_wallet: Address::generate(&env),
     };
     let result = client.try_verify_dependency_address_set(&addrs);
     assert!(matches!(
@@ -508,6 +514,18 @@ fn test_get_remittance_summary() {
     assert_eq!(spending.category, Category::Spending);
     assert_eq!(spending.amount, 5000);
     assert_eq!(spending.percentage, 50);
+}
+
+#[test]
+fn test_get_remittance_summary_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_remittance_summary(&user, &10_000i128, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -618,6 +636,18 @@ fn test_get_savings_report() {
 }
 
 #[test]
+fn test_get_savings_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_savings_report(&user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
+}
+
+#[test]
 fn test_get_bill_compliance_report() {
     let env = Env::default();
     env.mock_all_auths();
@@ -653,6 +683,18 @@ fn test_get_bill_compliance_report() {
     // This is expected behavior for the test
     assert_eq!(report.period_start, period_start);
     assert_eq!(report.period_end, period_end);
+}
+
+#[test]
+fn test_get_bill_compliance_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_bill_compliance_report(&user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -692,6 +734,18 @@ fn test_get_insurance_report() {
     assert_eq!(report.monthly_premium, 200);
     assert_eq!(report.annual_premium, 2400);
     assert_eq!(report.coverage_to_premium_ratio, 2083); // 50000 * 100 / 2400
+}
+
+#[test]
+fn test_get_insurance_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_insurance_report(&user, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -772,6 +826,18 @@ fn test_get_financial_health_report() {
     assert_eq!(report.savings_report.total_goals, 2);
     assert_eq!(report.insurance_report.active_policies, 1);
     assert_eq!(report.generated_at, 1704067200);
+}
+
+#[test]
+fn test_get_financial_health_report_rejects_invalid_period() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let result = client.try_get_financial_health_report(&user, &10_000i128, &200, &100);
+    assert!(matches!(result, Err(Ok(ReportingError::InvalidPeriod))));
 }
 
 #[test]
@@ -2242,39 +2308,38 @@ fn test_check_dependencies_succeeds_with_configured_contracts() {
         &family_wallet_id,
     );
 
-    use soroban_sdk::String as SStr;
     let statuses = client.check_dependencies(&admin);
     assert_eq!(statuses.len(), 5);
 
     // Check each status
     assert_eq!(
         statuses.get(0).unwrap().name,
-        SStr::from_str(&env, "remittance_split")
+        soroban_sdk::String::from_str(&env, "remittance_split")
     );
     assert!(statuses.get(0).unwrap().ok);
     assert_eq!(statuses.get(0).unwrap().error_category, None);
 
     assert_eq!(
         statuses.get(1).unwrap().name,
-        SStr::from_str(&env, "savings_goals")
+        soroban_sdk::String::from_str(&env, "savings_goals")
     );
     assert!(statuses.get(1).unwrap().ok);
 
     assert_eq!(
         statuses.get(2).unwrap().name,
-        SStr::from_str(&env, "bill_payments")
+        soroban_sdk::String::from_str(&env, "bill_payments")
     );
     assert!(statuses.get(2).unwrap().ok);
 
     assert_eq!(
         statuses.get(3).unwrap().name,
-        SStr::from_str(&env, "insurance")
+        soroban_sdk::String::from_str(&env, "insurance")
     );
     assert!(statuses.get(3).unwrap().ok);
 
     assert_eq!(
         statuses.get(4).unwrap().name,
-        SStr::from_str(&env, "family_wallet")
+        soroban_sdk::String::from_str(&env, "family_wallet")
     );
     assert!(statuses.get(4).unwrap().ok);
 }
