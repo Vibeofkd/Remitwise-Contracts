@@ -26,6 +26,11 @@ pub const MAX_DEP_PAGES: u32 = 20;
 
 /// Page size for dependency queries. This is the maximum number of items
 /// fetched per page from bill-payments and insurance contracts.
+/// 
+/// The aggregation loops fetch up to MAX_DEP_PAGES pages, allowing for
+/// up to MAX_DEP_PAGES * DEP_PAGE_LIMIT items to be aggregated.
+/// If the cap is reached, DataAvailability is set to Partial to indicate
+/// the report may be incomplete.
 pub const DEP_PAGE_LIMIT: u32 = 50;
 
 /// Financial health score (0-100)
