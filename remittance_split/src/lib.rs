@@ -1,6 +1,8 @@
 #![no_std]
+#![no_std]
 #![allow(clippy::too_many_arguments)]
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+extern crate alloc;
 #[cfg(test)]
 mod events_schema_test;
 #[cfg(test)]
@@ -9,9 +11,8 @@ mod test;
 use remitwise_common::{clamp_limit, EventCategory, EventPriority, RemitwiseEvents};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenClient, vec,
-    Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
+    Address, Bytes, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
-use soroban_sdk::crypto::Sha256;
 
 // Event topics
 const SPLIT_INITIALIZED: Symbol = symbol_short!("init");
@@ -75,6 +76,8 @@ pub enum RemittanceSplitError {
     ScheduleIntervalTooShort = 23,
     /// The schedule lead time exceeds the maximum allowed value.
     ScheduleLeadTimeTooLong = 24,
+    /// The deadline is zero or unreasonably far in the future.
+    InvalidDeadline = 25,
 }
 
 #[derive(Clone)]
@@ -111,8 +114,6 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 17280; // ~1 day
 const INSTANCE_BUMP_AMOUNT: u32 = 518400; // ~30 days
 /// Maximum number of used nonces tracked per address before the oldest are pruned.
 const MAX_USED_NONCES_PER_ADDR: u32 = 256;
-/// Maximum ledger seconds a signed request may remain valid after creation.
-const MAX_DEADLINE_WINDOW_SECS: u64 = 3600; // 1 hour
 /// Maximum number of remittance schedules allowed per owner to prevent storage bloat.
 pub const MAX_SCHEDULES_PER_OWNER: u32 = 50;
 /// Minimum allowed recurrence interval for repeating schedules (1 hour in seconds).
@@ -236,19 +237,8 @@ pub struct AuditEntry {
     pub success: bool,
 }
 
-/// Paginated result for audit log queries.
-#[contracttype]
-#[derive(Clone)]
-pub struct AuditPage {
-    /// Audit entries for this page, ordered by index ascending.
-    pub items: Vec<AuditEntry>,
-    /// Index to pass as `from_index` for the next page. 0 means no more pages.
-    pub next_cursor: u32,
-    /// Number of items returned in this page.
-    pub count: u32,
-}
 
-/// Paginated result for schedule queries.
+
 ///
 /// Provides stable cursor-based pagination so consumers can replay the schedule list
 /// without gaps or duplicates across page boundaries. Schedules are ordered by ID ascending.
@@ -1063,7 +1053,7 @@ impl RemittanceSplit {
     /// 1. Off-chain: Create DistributeUsdcRequest with deadline = now() + 600 seconds
     /// 2. Off-chain: Call get_request_hash to obtain hash
     /// 3. Off-chain: Sign the hash with payer's private key
-    /// 4. On-chain: Call distribute_usdc_with_hash_and_deadline with request and signature
+    /// 4. On-chain: Call distribute_usdc_signed with request and signature
     ///
     /// # Parameter Binding Fields
     /// All parameters are cryptographically bound via SHA-256:
@@ -1076,7 +1066,7 @@ impl RemittanceSplit {
     /// - `accounts.insurance`: Insurance destination (prevents fund misdirection)
     /// - `total_amount`: Total amount to distribute (prevents amount tampering)
     /// - `deadline`: Expiry time (prevents stale request use)
-    pub fn distribute_usdc_with_hash_and_deadline(
+    pub fn distribute_usdc_signed(
         env: Env,
         request: DistributeUsdcRequest,
         request_hash: Bytes,
@@ -1106,8 +1096,15 @@ impl RemittanceSplit {
         }
 
         // Verify request hash matches computed hash
-        let computed_hash = Self::compute_request_hash(&env, &request);
-        if computed_hash.ne(&request_hash) {
+        let computed_hash = Self::compute_request_hash(
+            symbol_short!("distrib"),
+            request.from.clone(),
+            request.nonce,
+            request.total_amount,
+            request.deadline,
+        );
+        let computed_hash_bytes = Bytes::from_array(&env, &computed_hash.to_be_bytes());
+        if computed_hash_bytes.ne(&request_hash) {
             Self::append_audit(&env, symbol_short!("distH"), &request.from, false);
             return Err(RemittanceSplitError::RequestHashMismatch);
         }
@@ -1858,7 +1855,7 @@ impl RemittanceSplit {
         }
 
         // Check schedule cap before creating new schedule
-        let owner_schedules: Vec<u32> = env
+        let mut owner_schedules: Vec<u32> = env
             .storage()
             .persistent()
             .get(&DataKey::OwnerSchedules(owner.clone()))
@@ -2194,7 +2191,7 @@ impl RemittanceSplit {
     /// * `limit`  - Maximum items to return; clamped to `[1, MAX_PAGE_LIMIT]`
     ///
     /// # Returns
-    /// `RemittanceSchedulePage` with:
+    /// `SchedulePage` with:
     /// - `items`: schedules for this page, ordered by ID ascending
     /// - `next_cursor`: `Some(next_index)` when more pages exist, `None` when exhausted
     /// - `count`: number of items in this page
@@ -2203,22 +2200,20 @@ impl RemittanceSplit {
         owner: Address,
         cursor: u32,
         limit: u32,
-    ) -> RemittanceSchedulePage {
-        let mut schedule_ids: Vec<u32> = env
+    ) -> SchedulePage {
+        let schedule_ids: Vec<u32> = env
             .storage()
             .persistent()
             .get(&DataKey::OwnerSchedules(owner.clone()))
             .unwrap_or_else(|| Vec::new(&env));
 
-        schedule_ids.sort_unstable();
-
         let len = schedule_ids.len();
         let cap = clamp_limit(limit);
 
         if cursor >= len {
-            return RemittanceSchedulePage {
+            return SchedulePage {
                 items: Vec::new(&env),
-                next_cursor: None,
+                next_cursor: 0,
                 count: 0,
             };
         }
@@ -2234,9 +2229,9 @@ impl RemittanceSplit {
         }
 
         let count = items.len();
-        let next_cursor = if end < len { Some(end) } else { None };
+        let next_cursor = if end < len { end } else { 0 };
 
-        RemittanceSchedulePage {
+        SchedulePage {
             items,
             next_cursor,
             count,

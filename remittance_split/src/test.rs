@@ -289,7 +289,7 @@ fn test_distribute_usdc_deadline_expired() {
     };
     
     let hash = client.get_request_hash(&request);
-    let result = client.try_distribute_usdc_with_hash_and_deadline(&request, &hash);
+    let result = client.try_distribute_usdc_signed(&request, &hash);
     assert_eq!(result, Err(Ok(RemittanceSplitError::DeadlineExpired)));
 }
 
@@ -329,7 +329,7 @@ fn test_distribute_usdc_deadline_too_far() {
     };
     
     let hash = client.get_request_hash(&request);
-    let result = client.try_distribute_usdc_with_hash_and_deadline(&request, &hash);
+    let result = client.try_distribute_usdc_signed(&request, &hash);
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDeadline)));
 }
 
@@ -369,7 +369,7 @@ fn test_distribute_usdc_deadline_zero() {
     };
     
     let hash = client.get_request_hash(&request);
-    let result = client.try_distribute_usdc_with_hash_and_deadline(&request, &hash);
+    let result = client.try_distribute_usdc_signed(&request, &hash);
     assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDeadline)));
 }
 
@@ -418,7 +418,7 @@ fn test_distribute_usdc_hash_mismatch() {
         wrong_hash.set(0, &(wrong_hash.get(0).unwrap() - 1));
     }
     
-    let result = client.try_distribute_usdc_with_hash_and_deadline(&request, &wrong_hash);
+    let result = client.try_distribute_usdc_signed(&request, &wrong_hash);
     assert_eq!(result, Err(Ok(RemittanceSplitError::RequestHashMismatch)));
 }
 
@@ -461,7 +461,7 @@ fn test_distribute_usdc_deadline_at_boundary() {
     
     // This should pass deadline validation
     // (It will fail for other reasons like missing USDC balance, but not deadline)
-    let result = client.try_distribute_usdc_with_hash_and_deadline(&request, &hash);
+    let result = client.try_distribute_usdc_signed(&request, &hash);
     
     // Should fail due to other reasons (e.g., balance), not deadline validation
     // We can't assert equality here since we didn't register USDC token,
