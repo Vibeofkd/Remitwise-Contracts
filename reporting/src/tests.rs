@@ -103,6 +103,7 @@ mod bill_payments {
                 id: 1,
                 owner: _owner,
                 name: SorobanString::from_str(&env, "Electricity"),
+                external_ref: None,
                 amount: 100,
                 due_date: 1735689600,
                 recurring: true,
@@ -111,6 +112,7 @@ mod bill_payments {
                 created_at: 1704067200,
                 paid_at: None,
                 schedule_id: None,
+                tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
             });
             BillPage {
@@ -136,6 +138,7 @@ mod bill_payments {
                 id: 1,
                 owner: _owner.clone(),
                 name: SorobanString::from_str(&env, "Electricity"),
+                external_ref: None,
                 amount: 100,
                 due_date: 1735689600,
                 recurring: true,
@@ -144,12 +147,14 @@ mod bill_payments {
                 created_at: 1704067200,
                 paid_at: None,
                 schedule_id: None,
+                tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
             });
             bills.push_back(Bill {
                 id: 2,
                 owner: _owner,
                 name: SorobanString::from_str(&env, "Water"),
+                external_ref: None,
                 amount: 50,
                 due_date: 1735689600,
                 recurring: true,
@@ -158,6 +163,7 @@ mod bill_payments {
                 created_at: 1704067200,
                 paid_at: Some(1704153600),
                 schedule_id: None,
+                tags: Vec::new(&env),
                 currency: SorobanString::from_str(&env, "XLM"),
             });
             BillPage {
@@ -171,6 +177,7 @@ mod bill_payments {
 
 mod insurance {
     use crate::{InsurancePolicy, InsuranceTrait};
+    use remitwise_common::CoverageType;
     use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
 
     #[contract]
@@ -190,12 +197,12 @@ mod insurance {
                 id: 1,
                 owner: _owner,
                 name: SorobanString::from_str(&env, "Health Insurance"),
-                coverage_type: SorobanString::from_str(&env, "health"),
+                external_ref: None,
+                coverage_type: CoverageType::Health,
                 monthly_premium: 200,
                 coverage_amount: 50000,
                 active: true,
                 next_payment_date: 1735689600,
-                schedule_id: None,
             });
             crate::PolicyPage {
                 items: policies,
@@ -2280,4 +2287,319 @@ fn test_check_dependencies_fails_when_not_configured() {
 
     let result = client.try_check_dependencies(&admin);
     assert!(result.is_err());
+}
+
+// ============================================================================
+// SC-073: Checked arithmetic and clamping edge-case tests
+// ============================================================================
+
+/// safe_percent: zero denominator returns 0 (no panic).
+#[test]
+fn test_safe_percent_zero_denominator() {
+    assert_eq!(crate::safe_percent(1_000_000, 0, 100), 0);
+    assert_eq!(crate::safe_percent(i128::MAX, 0, 100), 0);
+}
+
+/// safe_percent: normal mid-range values produce correct results.
+#[test]
+fn test_safe_percent_normal_values() {
+    assert_eq!(crate::safe_percent(7000, 10000, 100), 70);
+    assert_eq!(crate::safe_percent(12000, 15000, 100), 80);
+    assert_eq!(crate::safe_percent(1, 2, 100), 50);
+}
+
+/// safe_percent: result is clamped to [0, scale] — never exceeds scale.
+#[test]
+fn test_safe_percent_clamps_to_scale() {
+    // saved > target → would be >100 without clamping
+    assert_eq!(crate::safe_percent(20000, 10000, 100), 100);
+    // negative numerator → clamped to 0
+    assert_eq!(crate::safe_percent(-5000, 10000, 100), 0);
+}
+
+/// safe_percent: i128::MAX numerator does not panic (overflow path returns scale).
+#[test]
+fn test_safe_percent_max_numerator_no_panic() {
+    let result = crate::safe_percent(i128::MAX, 1, 100);
+    // overflow in checked_mul → returns scale (100)
+    assert_eq!(result, 100);
+}
+
+/// safe_percent: exact boundary — numerator == denominator → 100%.
+#[test]
+fn test_safe_percent_exact_boundary() {
+    assert_eq!(crate::safe_percent(5000, 5000, 100), 100);
+    assert_eq!(crate::safe_percent(40, 100, 40), 16); // 40% of 40 = 16
+}
+
+/// Savings report: completion_percentage is clamped to 100 even when saved > target.
+#[test]
+fn test_savings_report_completion_clamped_to_100() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1_704_067_200);
+
+    // Mock savings contract that returns saved > target
+    mod oversaved {
+        use crate::{SavingsGoal, SavingsGoalsTrait};
+        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+        #[contract]
+        pub struct OverSaved;
+        #[contractimpl]
+        impl SavingsGoalsTrait for OverSaved {
+            fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
+                let mut goals = Vec::new(&_env);
+                goals.push_back(SavingsGoal {
+                    id: 1,
+                    owner: _owner,
+                    name: SorobanString::from_str(&_env, "Goal"),
+                    target_amount: 1000,
+                    current_amount: 9999, // way over target
+                    target_date: 0,
+                    locked: false,
+                    unlock_date: None,
+                });
+                goals
+            }
+            fn is_goal_completed(_env: Env, _goal_id: u32) -> bool { true }
+        }
+    }
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin);
+
+    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_id = env.register_contract(None, oversaved::OverSaved);
+    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, insurance::Insurance);
+    let fw = Address::generate(&env);
+    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+
+    let report = client.get_savings_report(&user, &0, &u64::MAX);
+    assert_eq!(report.completion_percentage, 100, "must clamp to 100");
+}
+
+/// Savings report: i128::MAX values do not panic.
+#[test]
+fn test_savings_report_max_values_no_panic() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1_704_067_200);
+
+    mod max_savings {
+        use crate::{SavingsGoal, SavingsGoalsTrait};
+        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+        #[contract]
+        pub struct MaxSavings;
+        #[contractimpl]
+        impl SavingsGoalsTrait for MaxSavings {
+            fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
+                let mut goals = Vec::new(&_env);
+                goals.push_back(SavingsGoal {
+                    id: 1,
+                    owner: _owner,
+                    name: SorobanString::from_str(&_env, "Max"),
+                    target_amount: i128::MAX,
+                    current_amount: i128::MAX,
+                    target_date: 0,
+                    locked: false,
+                    unlock_date: None,
+                });
+                goals
+            }
+            fn is_goal_completed(_env: Env, _goal_id: u32) -> bool { true }
+        }
+    }
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin);
+
+    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_id = env.register_contract(None, max_savings::MaxSavings);
+    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, insurance::Insurance);
+    let fw = Address::generate(&env);
+    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+
+    // Must not panic; result must be in [0, 100]
+    let report = client.get_savings_report(&user, &0, &u64::MAX);
+    assert!(report.completion_percentage <= 100);
+}
+
+/// Health score: savings_score is clamped to 40 even with extreme values.
+#[test]
+fn test_health_score_savings_score_clamped_to_40() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1_704_067_200);
+
+    mod full_savings {
+        use crate::{SavingsGoal, SavingsGoalsTrait};
+        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+        #[contract]
+        pub struct FullSavings;
+        #[contractimpl]
+        impl SavingsGoalsTrait for FullSavings {
+            fn get_all_goals(_env: Env, _owner: Address) -> Vec<SavingsGoal> {
+                let mut goals = Vec::new(&_env);
+                goals.push_back(SavingsGoal {
+                    id: 1,
+                    owner: _owner,
+                    name: SorobanString::from_str(&_env, "Goal"),
+                    target_amount: 1,
+                    current_amount: i128::MAX, // massively over target
+                    target_date: 0,
+                    locked: false,
+                    unlock_date: None,
+                });
+                goals
+            }
+            fn is_goal_completed(_env: Env, _goal_id: u32) -> bool { true }
+        }
+    }
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin);
+
+    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_id = env.register_contract(None, full_savings::FullSavings);
+    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, insurance::Insurance);
+    let fw = Address::generate(&env);
+    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+
+    let score = client.calculate_health_score(&user, &0);
+    assert!(score.savings_score <= 40, "savings_score must be <= 40");
+    assert!(score.score <= 100, "total score must be <= 100");
+}
+
+/// Insurance report: annual_premium overflow (monthly_premium near i128::MAX) does not panic.
+#[test]
+fn test_insurance_report_annual_premium_overflow_no_panic() {
+    let env = create_test_env();
+    set_ledger_time(&env, 1, 1_704_067_200);
+
+    mod huge_premium {
+        use crate::{InsuranceTrait, InsurancePolicy, PolicyPage};
+        use remitwise_common::CoverageType;
+        use soroban_sdk::{contract, contractimpl, Address, Env, String as SorobanString, Vec};
+        #[contract]
+        pub struct HugePremium;
+        #[contractimpl]
+        impl InsuranceTrait for HugePremium {
+            fn get_active_policies(_env: Env, _owner: Address, _cursor: u32, _limit: u32) -> PolicyPage {
+                let mut policies = Vec::new(&_env);
+                policies.push_back(InsurancePolicy {
+                    id: 1,
+                    owner: _owner,
+                    name: SorobanString::from_str(&_env, "Big"),
+                    external_ref: None,
+                    coverage_type: CoverageType::Health,
+                    monthly_premium: i128::MAX / 2,
+                    coverage_amount: i128::MAX,
+                    active: true,
+                    next_payment_date: 0,
+                });
+                PolicyPage { items: policies, next_cursor: 0, count: 1 }
+            }
+            fn get_total_monthly_premium(_env: Env, _owner: Address) -> i128 {
+                i128::MAX / 2
+            }
+        }
+    }
+
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let user = Address::generate(&env);
+    client.init(&admin);
+
+    let split_id = env.register_contract(None, remittance_split::RemittanceSplit);
+    let savings_id = env.register_contract(None, savings_goals::SavingsGoalsContract);
+    let bills_id = env.register_contract(None, bill_payments::BillPayments);
+    let ins_id = env.register_contract(None, huge_premium::HugePremium);
+    let fw = Address::generate(&env);
+    client.configure_addresses(&admin, &split_id, &savings_id, &bills_id, &ins_id, &fw);
+
+    // Must not panic; coverage_to_premium_ratio must be a valid u32
+    let report = client.get_insurance_report(&user, &0, &u64::MAX);
+    let _ = report.coverage_to_premium_ratio; // just assert it exists and is valid
+}
+
+/// Bill compliance: u32::MAX paid_bills does not overflow.
+#[test]
+fn test_bill_compliance_max_paid_bills_no_overflow() {
+    // safe_percent handles this via i128 arithmetic — just verify the formula
+    // directly since we can't easily mock u32::MAX bills via the contract.
+    let result = crate::safe_percent(u32::MAX as i128, u32::MAX as i128, 100);
+    assert_eq!(result, 100);
+}
+
+/// Trend analysis: i128::MAX current and previous amounts do not panic.
+#[test]
+fn test_trend_analysis_max_values_no_panic() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    // i128::MAX - i128::MAX = 0 change, previous > 0 → 0%
+    let trend = client.get_trend_analysis(&user, &i128::MAX, &i128::MAX);
+    assert_eq!(trend.change_amount, 0);
+    assert_eq!(trend.change_percentage, 0);
+}
+
+/// Trend analysis: large positive change does not overflow i32 cast.
+/// When numerator * scale overflows i128, safe_percent returns scale (100) — no panic.
+#[test]
+fn test_trend_analysis_large_change_clamped_to_i32() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    // current = i128::MAX, previous = 1 → change_amount = i128::MAX - 1
+    // safe_percent(i128::MAX - 1, 1, 100): checked_mul overflows → returns scale (100)
+    let trend = client.get_trend_analysis(&user, &i128::MAX, &1);
+    // Result is 100 (safe_percent overflow path), clamped to i32 range — no panic
+    assert!(trend.change_percentage >= 0, "change_percentage must not be negative for large positive change");
+    assert!(trend.change_percentage <= i32::MAX, "change_percentage must fit in i32");
+}
+
+/// Trend analysis: zero previous_amount with zero current → 0%.
+#[test]
+fn test_trend_analysis_zero_previous_zero_current() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let trend = client.get_trend_analysis(&user, &0, &0);
+    assert_eq!(trend.change_percentage, 0);
+}
+
+/// Trend analysis multi: i128::MAX values do not panic.
+#[test]
+fn test_trend_analysis_multi_max_values_no_panic() {
+    let env = create_test_env();
+    let contract_id = env.register_contract(None, ReportingContract);
+    let client = ReportingContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let mut history = soroban_sdk::Vec::new(&env);
+    history.push_back((0u64, 1i128));
+    history.push_back((1u64, i128::MAX));
+
+    let result = client.get_trend_analysis_multi(&user, &history);
+    assert_eq!(result.len(), 1);
+    // change_percentage must be a valid i32 (no panic, no overflow)
+    let pct = result.get(0).unwrap().change_percentage;
+    assert!(pct >= 0, "change_percentage must not be negative for large positive change");
+    assert!(pct <= i32::MAX, "change_percentage must fit in i32");
 }

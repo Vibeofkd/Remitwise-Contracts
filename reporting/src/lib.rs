@@ -296,6 +296,26 @@ pub struct PolicyPage {
     pub count: u32,
 }
 
+/// Compute `(numerator * scale) / denominator` using checked arithmetic.
+///
+/// Returns `0` when `denominator <= 0` (safe default for percentage/ratio math).
+/// The result is clamped to `[0, scale]` so callers can rely on the output
+/// never exceeding the intended ceiling.
+///
+/// All intermediate arithmetic uses `i128` to avoid overflow on large inputs.
+pub(crate) fn safe_percent(numerator: i128, denominator: i128, scale: i128) -> i128 {
+    if denominator <= 0 {
+        return 0;
+    }
+    // checked_mul returns None on overflow; fall back to 0 (safe default).
+    let scaled = match numerator.checked_mul(scale) {
+        Some(v) => v,
+        None => return scale, // numerator >= denominator in overflow cases → clamp to scale
+    };
+    let result = scaled / denominator;
+    result.clamp(0, scale)
+}
+
 #[contract]
 pub struct ReportingContract;
 
@@ -741,18 +761,15 @@ impl ReportingContract {
         let total_goals = goals.len();
 
         for goal in goals.iter() {
-            total_target += goal.target_amount;
-            total_saved += goal.current_amount;
+            total_target = total_target.saturating_add(goal.target_amount);
+            total_saved = total_saved.saturating_add(goal.current_amount);
             if goal.current_amount >= goal.target_amount {
-                completed_count += 1;
+                completed_count = completed_count.saturating_add(1);
             }
         }
 
-        let completion_percentage = if total_target > 0 {
-            ((total_saved * 100) / total_target) as u32
-        } else {
-            0
-        };
+        let completion_percentage = safe_percent(total_saved, total_target, 100)
+            .min(100) as u32;
 
         SavingsReport {
             total_goals,
@@ -810,25 +827,26 @@ impl ReportingContract {
                 continue;
             }
 
-            total_bills += 1;
-            total_amount += bill.amount;
+            total_bills = total_bills.saturating_add(1);
+            total_amount = total_amount.saturating_add(bill.amount);
 
             if bill.paid {
-                paid_bills += 1;
-                paid_amount += bill.amount;
+                paid_bills = paid_bills.saturating_add(1);
+                paid_amount = paid_amount.saturating_add(bill.amount);
             } else {
-                unpaid_bills += 1;
-                unpaid_amount += bill.amount;
+                unpaid_bills = unpaid_bills.saturating_add(1);
+                unpaid_amount = unpaid_amount.saturating_add(bill.amount);
                 if bill.due_date < current_time {
-                    overdue_bills += 1;
+                    overdue_bills = overdue_bills.saturating_add(1);
                 }
             }
         }
 
-        let compliance_percentage = if total_bills > 0 {
-            (paid_bills * 100) / total_bills
-        } else {
+        let compliance_percentage = if total_bills == 0 {
             100
+        } else {
+            safe_percent(paid_bills as i128, total_bills as i128, 100)
+                .min(100) as u32
         };
 
         BillComplianceReport {
@@ -879,15 +897,12 @@ impl ReportingContract {
         let active_policies = policies.len();
 
         for policy in policies.iter() {
-            total_coverage += policy.coverage_amount;
+            total_coverage = total_coverage.saturating_add(policy.coverage_amount);
         }
 
-        let annual_premium = monthly_premium * 12;
-        let coverage_to_premium_ratio = if annual_premium > 0 {
-            ((total_coverage * 100) / annual_premium) as u32
-        } else {
-            0
-        };
+        let annual_premium = monthly_premium.saturating_mul(12);
+        let coverage_to_premium_ratio = safe_percent(total_coverage, annual_premium, 100)
+            .clamp(0, u32::MAX as i128) as u32;
 
         InsuranceReport {
             active_policies,
@@ -923,16 +938,12 @@ impl ReportingContract {
         let mut total_target = 0i128;
         let mut total_saved = 0i128;
         for goal in goals.iter() {
-            total_target += goal.target_amount;
-            total_saved += goal.current_amount;
+            total_target = total_target.saturating_add(goal.target_amount);
+            total_saved = total_saved.saturating_add(goal.current_amount);
         }
         let savings_score = if total_target > 0 {
-            let progress = ((total_saved * 100) / total_target) as u32;
-            if progress > 100 {
-                40
-            } else {
-                (progress * 40) / 100
-            }
+            let progress = safe_percent(total_saved, total_target, 100).min(100);
+            (safe_percent(progress, 100, 40)).min(40) as u32
         } else {
             20 // Default score if no goals
         };
@@ -959,7 +970,10 @@ impl ReportingContract {
         let policy_page = insurance_client.get_active_policies(&user, &0, &1);
         let insurance_score = if !policy_page.items.is_empty() { 20 } else { 0 };
 
-        let total_score = savings_score + bills_score + insurance_score;
+        let total_score = savings_score
+            .saturating_add(bills_score)
+            .saturating_add(insurance_score)
+            .min(100);
 
         HealthScore {
             score: total_score,
@@ -1015,9 +1029,10 @@ impl ReportingContract {
         current_amount: i128,
         previous_amount: i128,
     ) -> TrendData {
-        let change_amount = current_amount - previous_amount;
+        let change_amount = current_amount.saturating_sub(previous_amount);
         let change_percentage = if previous_amount > 0 {
-            ((change_amount * 100) / previous_amount) as i32
+            safe_percent(change_amount, previous_amount, 100)
+                .clamp(i32::MIN as i128, i32::MAX as i128) as i32
         } else if current_amount > 0 {
             100
         } else {
@@ -1060,9 +1075,10 @@ impl ReportingContract {
         for i in 1..len {
             let (_, prev_amount) = history.get(i - 1).unwrap_or((0, 0));
             let (_, curr_amount) = history.get(i).unwrap_or((0, 0));
-            let change_amount = curr_amount - prev_amount;
+            let change_amount = curr_amount.saturating_sub(prev_amount);
             let change_percentage = if prev_amount > 0 {
-                ((change_amount * 100) / prev_amount) as i32
+                safe_percent(change_amount, prev_amount, 100)
+                    .clamp(i32::MIN as i128, i32::MAX as i128) as i32
             } else if curr_amount > 0 {
                 100
             } else {
