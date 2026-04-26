@@ -18,10 +18,16 @@ const SECONDS_PER_DAY: u64 = 86_400;
 /// Maximum length for currency codes (ISO 4217 is 3 letters)
 const MAX_CURRENCY_LEN: u32 = 10;
 
+/// Maximum active bills per owner
+const MAX_BILLS_PER_OWNER: u32 = 1_000;
+
 /// Minimum length for external reference strings
 const MIN_EXTERNAL_REF_LEN: u32 = 1;
 /// Maximum length for external reference strings
 const MAX_EXTERNAL_REF_LEN: u32 = 64;
+
+/// Maximum number of active bills per owner.
+pub const MAX_BILLS_PER_OWNER: u32 = 100;
 
 /// Validates that a currency string contains only ASCII alphabetic characters.
 /// Returns true if the string is valid (all ASCII letters A-Z or a-z).
@@ -73,6 +79,9 @@ pub mod pause_functions {
 
 const STORAGE_UNPAID_TOTALS: Symbol = symbol_short!("UNPD_TOT");
 const STORAGE_EXT_REF_IDX: Symbol = symbol_short!("EXTRIDX");
+const STORAGE_OWNER_INDEX: Symbol = symbol_short!("OWN_IDX");
+const STORAGE_ARCH_INDEX: Symbol = symbol_short!("ARCH_IDX");
+const ARCH_IDX_KEY: Symbol = STORAGE_ARCH_INDEX;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -112,6 +121,8 @@ pub enum BillPaymentsError {
     InvalidExternalRef = 16,
     /// External reference already used by another active bill for this owner
     DuplicateExternalRef = 17,
+    /// Owner has reached the maximum number of allowed active bills.
+    OwnerBillCapExceeded = 18,
 }
 
 // Back-compat alias: large parts of this crate (and tests) still refer to `Error`.
@@ -198,20 +209,32 @@ impl BillPayments {
         idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Append `bill_id` to the active index for `owner`.
-    /// IDs are appended in creation order, which is ID-ascending by construction.
+    /// Insert `bill_id` into the active index for `owner` in ascending order.
     fn index_add_active(env: &Env, owner: &Address, bill_id: u32) {
         let mut idx: Map<Address, Vec<u32>> = env
             .storage()
             .instance()
             .get(&STORAGE_OWNER_INDEX)
             .unwrap_or_else(|| Map::new(env));
-        let mut ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
-        ids.push_back(bill_id);
-        idx.set(owner.clone(), ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_OWNER_INDEX, &idx);
+        let ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
+        let mut new_ids: Vec<u32> = Vec::new(env);
+        let mut inserted = false;
+        for id in ids.iter() {
+            if !inserted {
+                if bill_id == id {
+                    inserted = true;
+                } else if bill_id < id {
+                    new_ids.push_back(bill_id);
+                    inserted = true;
+                }
+            }
+            new_ids.push_back(id);
+        }
+        if !inserted {
+            new_ids.push_back(bill_id);
+        }
+        idx.set(owner.clone(), new_ids);
+        env.storage().instance().set(&STORAGE_OWNER_INDEX, &idx);
     }
 
     /// Remove `bill_id` from the active index for `owner`.
@@ -229,24 +252,65 @@ impl BillPayments {
             }
         }
         idx.set(owner.clone(), new_ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_OWNER_INDEX, &idx);
+        env.storage().instance().set(&STORAGE_OWNER_INDEX, &idx);
     }
 
-    /// Append `bill_id` to the archived index for `owner`.
-    fn index_add_archived(env: &Env, owner: &Address, bill_id: u32) {
+    /// Remove multiple `bill_ids` from the active index for `owner`.
+    fn index_remove_active_batch(env: &Env, owner: &Address, bill_ids: &Vec<u32>) {
+        let mut idx: Map<Address, Vec<u32>> = env
+            .storage()
+            .instance()
+            .get(&STORAGE_OWNER_INDEX)
+            .unwrap_or_else(|| Map::new(env));
+        let ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
+        let mut new_ids: Vec<u32> = Vec::new(env);
+        for id in ids.iter() {
+            let mut removed = false;
+            for b_id in bill_ids.iter() {
+                if id == b_id {
+                    removed = true;
+                    break;
+                }
+            }
+            if !removed {
+                new_ids.push_back(id);
+            }
+        }
+        idx.set(owner.clone(), new_ids);
+        env.storage().instance().set(&STORAGE_OWNER_INDEX, &idx);
+    }
+
+    /// Add multiple `bill_ids` to the archived index for `owner`.
+    fn index_add_archived_batch(env: &Env, owner: &Address, bill_ids: &Vec<u32>) {
         let mut idx: Map<Address, Vec<u32>> = env
             .storage()
             .instance()
             .get(&STORAGE_ARCH_INDEX)
             .unwrap_or_else(|| Map::new(env));
-        let mut ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
-        ids.push_back(bill_id);
-        idx.set(owner.clone(), ids);
-        env.storage()
-            .instance()
-            .set(&STORAGE_ARCH_INDEX, &idx);
+        let mut owner_ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
+
+        for bill_id in bill_ids.iter() {
+            let mut new_ids: Vec<u32> = Vec::new(env);
+            let mut inserted = false;
+            for id in owner_ids.iter() {
+                if !inserted {
+                    if bill_id == id {
+                        inserted = true;
+                    } else if bill_id < id {
+                        new_ids.push_back(bill_id);
+                        inserted = true;
+                    }
+                }
+                new_ids.push_back(id);
+            }
+            if !inserted {
+                new_ids.push_back(bill_id);
+            }
+            owner_ids = new_ids;
+        }
+
+        idx.set(owner.clone(), owner_ids);
+        env.storage().instance().set(&STORAGE_ARCH_INDEX, &idx);
     }
 
     /// Remove `bill_id` from the archived index for `owner`.
@@ -264,9 +328,32 @@ impl BillPayments {
             }
         }
         idx.set(owner.clone(), new_ids);
-        env.storage()
+        env.storage().instance().set(&STORAGE_ARCH_INDEX, &idx);
+    }
+
+    /// Remove multiple `bill_ids` from the archived index for `owner`.
+    fn index_remove_archived_batch(env: &Env, owner: &Address, bill_ids: &Vec<u32>) {
+        let mut idx: Map<Address, Vec<u32>> = env
+            .storage()
             .instance()
-            .set(&STORAGE_ARCH_INDEX, &idx);
+            .get(&STORAGE_ARCH_INDEX)
+            .unwrap_or_else(|| Map::new(env));
+        let ids = idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env));
+        let mut new_ids: Vec<u32> = Vec::new(env);
+        for id in ids.iter() {
+            let mut removed = false;
+            for b_id in bill_ids.iter() {
+                if id == b_id {
+                    removed = true;
+                    break;
+                }
+            }
+            if !removed {
+                new_ids.push_back(id);
+            }
+        }
+        idx.set(owner.clone(), new_ids);
+        env.storage().instance().set(&STORAGE_ARCH_INDEX, &idx);
     }
 
     // -----------------------------------------------------------------------
@@ -357,10 +444,7 @@ impl BillPayments {
     ///
     /// Allowed characters: ASCII alphanumeric, hyphens, underscores, dots, colons.
     /// Length must be within `[MIN_EXTERNAL_REF_LEN, MAX_EXTERNAL_REF_LEN]`.
-    fn validate_external_ref(
-        env: &Env,
-        ext_ref: &String,
-    ) -> Result<String, BillPaymentsError> {
+    fn validate_external_ref(_env: &Env, ext_ref: &String) -> Result<String, BillPaymentsError> {
         let len = ext_ref.len();
         if len < MIN_EXTERNAL_REF_LEN || len > MAX_EXTERNAL_REF_LEN {
             return Err(BillPaymentsError::InvalidExternalRef);
@@ -401,9 +485,7 @@ impl BillPayments {
     }
 
     fn save_ext_ref_index(env: &Env, idx: &Map<Address, Map<String, u32>>) {
-        env.storage()
-            .instance()
-            .set(&STORAGE_EXT_REF_IDX, idx);
+        env.storage().instance().set(&STORAGE_EXT_REF_IDX, idx);
     }
 
     /// Claim `ext_ref` for `owner` → `bill_id`. Fails if already claimed by another bill.
@@ -414,9 +496,8 @@ impl BillPayments {
         bill_id: u32,
     ) -> Result<(), BillPaymentsError> {
         let mut idx = Self::get_ext_ref_index(env);
-        let mut owner_map: Map<String, u32> = idx
-            .get(owner.clone())
-            .unwrap_or_else(|| Map::new(env));
+        let mut owner_map: Map<String, u32> =
+            idx.get(owner.clone()).unwrap_or_else(|| Map::new(env));
 
         if let Some(existing_id) = owner_map.get(ext_ref.clone()) {
             if existing_id != bill_id {
@@ -768,6 +849,7 @@ impl BillPayments {
         frequency_days: u32,
         external_ref: Option<String>,
         currency: String,
+        schedule_id: Option<u32>,
     ) -> Result<u32, BillPaymentsError> {
         owner.require_auth();
         Self::require_not_paused(&env, pause_functions::CREATE_BILL)?;
@@ -817,7 +899,6 @@ impl BillPayments {
         }
 
         let current_time = env.ledger().timestamp();
-        let bill_external_ref = validated_ext_ref.clone();
         let bill = Bill {
             id: next_id,
             owner: owner.clone(),
@@ -830,7 +911,7 @@ impl BillPayments {
             paid: false,
             created_at: current_time,
             paid_at: None,
-            schedule_id,
+            schedule_id: None,
             tags: Vec::new(&env),
             currency: resolved_currency,
         };
@@ -876,7 +957,7 @@ impl BillPayments {
             .unwrap_or_else(|| Map::new(&env));
 
         let mut bill = bills.get(bill_id).ok_or(BillPaymentsError::BillNotFound)?;
-        let bill_external_ref = bill.external_ref.clone();
+        let _bill_external_ref = bill.external_ref.clone();
 
         if bill.owner != caller {
             return Err(BillPaymentsError::Unauthorized);
@@ -1517,30 +1598,35 @@ impl BillPayments {
         let current_time = env.ledger().timestamp();
         let mut archived_count = 0u32;
         let mut to_remove: Vec<u32> = Vec::new(&env);
+        let mut owner_to_archived: Map<Address, Vec<u32>> = Map::new(&env);
 
         for (id, bill) in bills.iter() {
             if let Some(paid_at) = bill.paid_at {
-                    if bill.paid && paid_at < before_timestamp {
-                        // Release external_ref from the active index during archival
-                        if let Some(ref r) = bill.external_ref {
-                            Self::release_external_ref(&env, &bill.owner, r);
-                        }
+                if bill.paid && paid_at < before_timestamp {
+                    // Release external_ref from the active index during archival
+                    if let Some(ref r) = bill.external_ref {
+                        Self::release_external_ref(&env, &bill.owner, r);
+                    }
 
-                        let archived_bill = ArchivedBill {
-                            id: bill.id,
-                            owner: bill.owner.clone(),
-                            name: bill.name.clone(),
-                            external_ref: bill.external_ref.clone(),
-                            amount: bill.amount,
-                            paid_at,
-                            archived_at: current_time,
-                            tags: bill.tags.clone(),
-                            currency: bill.currency.clone(),
-                        };
+                    let archived_bill = ArchivedBill {
+                        id: bill.id,
+                        owner: bill.owner.clone(),
+                        name: bill.name.clone(),
+                        external_ref: bill.external_ref.clone(),
+                        amount: bill.amount,
+                        paid_at,
+                        archived_at: current_time,
+                        tags: bill.tags.clone(),
+                        currency: bill.currency.clone(),
+                    };
                     archived.set(id, archived_bill);
-                    let mut owner_ids = Self::get_owner_index(&env, &bill.owner);
-                    owner_ids.push_back(id);
-                    Self::set_owner_index(&env, &bill.owner, owner_ids);
+
+                    let mut list = owner_to_archived
+                        .get(bill.owner.clone())
+                        .unwrap_or_else(|| Vec::new(&env));
+                    list.push_back(id);
+                    owner_to_archived.set(bill.owner.clone(), list);
+
                     to_remove.push_back(id);
                     archived_count += 1;
                 }
@@ -1558,13 +1644,10 @@ impl BillPayments {
             .instance()
             .set(&symbol_short!("ARCH_BILL"), &archived);
 
-        // Update owner indexes: move archived IDs from active → archived index.
-        // We iterate the archived map to find owner per ID.
-        for id in to_remove.iter() {
-            if let Some(bill) = archived.get(id) {
-                Self::index_remove_active(&env, &bill.owner, id);
-                Self::index_add_archived(&env, &bill.owner, id);
-            }
+        // Update owner indexes in batch per owner
+        for (owner, ids) in owner_to_archived.iter() {
+            Self::index_remove_active_batch(&env, &owner, &ids);
+            Self::index_add_archived_batch(&env, &owner, &ids);
         }
 
         Self::extend_archive_ttl(&env);
@@ -1581,25 +1664,23 @@ impl BillPayments {
     }
 
     pub fn restore_bill(env: Env, caller: Address, bill_id: u32) -> Result<(), BillPaymentsError> {
-            caller.require_auth();
-            Self::require_not_paused(&env, pause_functions::RESTORE)?;
-            Self::extend_instance_ttl(&env);
+        caller.require_auth();
+        Self::require_not_paused(&env, pause_functions::RESTORE)?;
+        Self::extend_instance_ttl(&env);
 
-            let mut archived: Map<u32, ArchivedBill> = env
-                .storage()
-                .instance()
-                .get(&symbol_short!("ARCH_BILL"))
-                .unwrap_or_else(|| Map::new(&env));
-            let archived_bill = archived
-                .get(bill_id)
-                .ok_or(BillPaymentsError::BillNotFound)?;
+        let mut archived: Map<u32, ArchivedBill> = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("ARCH_BILL"))
+            .unwrap_or_else(|| Map::new(&env));
+        let archived_bill = archived
+            .get(bill_id)
+            .ok_or(BillPaymentsError::BillNotFound)?;
 
-            if archived_bill.owner != caller {
-                return Err(BillPaymentsError::Unauthorized);
-            }
+        if archived_bill.owner != caller {
+            return Err(BillPaymentsError::Unauthorized);
+        }
 
-        // Reclaim external_ref in the active index. 
-        // Fails if another bill now uses this ref.
         if let Some(ref r) = archived_bill.external_ref {
             Self::claim_external_ref(&env, &caller, r, bill_id)?;
         }
@@ -1610,44 +1691,48 @@ impl BillPayments {
             .get(&symbol_short!("BILLS"))
             .unwrap_or_else(|| Map::new(&env));
 
-            bills.set(bill_id, restored_bill);
-            archived.remove(bill_id);
+        let restored_bill = Bill {
+            id: archived_bill.id,
+            owner: archived_bill.owner.clone(),
+            name: archived_bill.name,
+            external_ref: archived_bill.external_ref,
+            amount: archived_bill.amount,
+            due_date: env.ledger().timestamp() + SECONDS_PER_DAY,
+            recurring: false,
+            frequency_days: 0,
+            paid: true,
+            created_at: env.ledger().timestamp(),
+            paid_at: Some(archived_bill.paid_at),
+            schedule_id: None,
+            tags: archived_bill.tags,
+            currency: archived_bill.currency,
+        };
 
-            // Remove from ARCH_IDX
-            let old_ids = Self::get_owner_index(&env, &archived_bill.owner);
-            let mut new_ids: Vec<u32> = Vec::new(&env);
-            for eid in old_ids.iter() {
-                if eid != bill_id {
-                    new_ids.push_back(eid);
-                }
-            }
-            Self::set_owner_index(&env, &archived_bill.owner, new_ids);
+        bills.set(bill_id, restored_bill);
+        archived.remove(bill_id);
 
-            env.storage()
-                .instance()
-                .set(&symbol_short!("BILLS"), &bills);
-            env.storage()
-                .instance()
-                .set(&symbol_short!("ARCH_BILL"), &archived);
+        Self::index_remove_archived(&env, &caller, bill_id);
+        Self::index_add_active(&env, &caller, bill_id);
 
-            Self::update_storage_stats(&env);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("BILLS"), &bills);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("ARCH_BILL"), &archived);
 
-            RemitwiseEvents::emit(
-                &env,
-                EventCategory::State,
-                EventPriority::Medium,
-                symbol_short!("restored"),
-                bill_id,
-            );
-            Ok(())
-        }
+        Self::update_storage_stats(&env);
 
-    /// @notice Permanently delete archived bills with `archived_at < before_timestamp`.
-    /// @dev Permissionless maintenance operation for archive compaction.
-    /// @param caller Authenticated caller executing cleanup.
-    /// @param before_timestamp Exclusive upper bound for `archived_at`.
-    /// @return Number of archived records removed.
-    /// @security Only archived data is touched; active bills are unaffected.
+        RemitwiseEvents::emit(
+            &env,
+            EventCategory::State,
+            EventPriority::Medium,
+            symbol_short!("restored"),
+            bill_id,
+        );
+        Ok(())
+    }
+
     pub fn bulk_cleanup_bills(
         env: Env,
         caller: Address,
@@ -1663,43 +1748,40 @@ impl BillPayments {
             .get(&symbol_short!("ARCH_BILL"))
             .unwrap_or_else(|| Map::new(&env));
         let mut deleted_count = 0u32;
-        let mut to_remove: Vec<(u32, Address)> = Vec::new(&env);
+        let mut to_remove: Vec<u32> = Vec::new(&env);
+        let mut owner_to_removed: Map<Address, Vec<u32>> = Map::new(&env);
 
         for (id, bill) in archived.iter() {
             if bill.archived_at < before_timestamp {
-                // Release external_ref if it exists
                 if let Some(ref r) = bill.external_ref {
                     Self::release_external_ref(&env, &bill.owner, r);
                 }
+
+                let mut list = owner_to_removed
+                    .get(bill.owner.clone())
+                    .unwrap_or_else(|| Vec::new(&env));
+                list.push_back(id);
+                owner_to_removed.set(bill.owner.clone(), list);
+
                 to_remove.push_back(id);
                 deleted_count += 1;
             }
         }
 
-        for (id, owner) in to_remove.iter() {
+        for id in to_remove.iter() {
             archived.remove(id);
-            // Remove from ARCH_IDX
-            let old_ids = Self::get_owner_index(&env, &owner);
-            let mut new_ids: Vec<u32> = Vec::new(&env);
-            for eid in old_ids.iter() {
-                if eid != id {
-                    new_ids.push_back(eid);
-                }
-            }
-            Self::set_owner_index(&env, &owner, new_ids);
         }
 
         env.storage()
             .instance()
             .set(&symbol_short!("ARCH_BILL"), &archived);
+
+        // Update owner indexes in batch per owner
+        for (owner, ids) in owner_to_removed.iter() {
+            Self::index_remove_archived_batch(&env, &owner, &ids);
+        }
         Self::update_storage_stats(&env);
 
-        RemitwiseEvents::emit_batch(
-            &env,
-            EventCategory::System,
-            symbol_short!("cleaned"),
-            deleted_count,
-        );
         Ok(deleted_count)
     }
 
@@ -2132,17 +2214,6 @@ impl BillPayments {
         idx.get(owner.clone()).unwrap_or_else(|| Vec::new(env))
     }
 
-    /// Persist the owner's archived bill ID list back to ARCH_IDX.
-    fn set_owner_index(env: &Env, owner: &Address, ids: Vec<u32>) {
-        let mut idx: Map<Address, Vec<u32>> = env
-            .storage()
-            .instance()
-            .get(&ARCH_IDX_KEY)
-            .unwrap_or_else(|| Map::new(env));
-        idx.set(owner.clone(), ids);
-        env.storage().instance().set(&ARCH_IDX_KEY, &idx);
-    }
-
     fn adjust_unpaid_total(env: &Env, owner: &Address, delta: i128) {
         if delta == 0 {
             return;
@@ -2203,6 +2274,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(env, "XLM"),
+                &None,
             );
             ids.push_back(id);
         }
@@ -2438,6 +2510,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
             client.create_bill(
                 &owner_b,
@@ -2448,6 +2521,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2494,7 +2568,7 @@ mod test {
         let owner = Address::generate(&env);
 
         setup_bills(&env, &client, &owner, 3);
-        let page = client.get_overdue_bills(&owner, &0, &10);
+        let page = client.get_overdue_bills(&0, &10);
         assert_eq!(page.count, 0);
     }
 
@@ -2522,6 +2596,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2530,11 +2605,11 @@ mod test {
         env.ledger().set_timestamp(25000);
 
         // Now get_overdue_bills will actually find the 6 bills
-        let page1 = client.get_overdue_bills(&owner, &0, &4);
+        let page1 = client.get_overdue_bills(&0, &4);
         assert_eq!(page1.count, 4);
         assert!(page1.next_cursor > 0);
 
-        let page2 = client.get_overdue_bills(&owner, &page1.next_cursor, &4);
+        let page2 = client.get_overdue_bills(&page1.next_cursor, &4);
         assert_eq!(page2.count, 2);
         assert_eq!(page2.next_cursor, 0);
     }
@@ -2657,6 +2732,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
             owner_a_ids.push_back(id_a);
 
@@ -2669,6 +2745,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2713,6 +2790,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
             ids.push_back(id);
             client.create_bill(
@@ -2724,6 +2802,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2767,6 +2846,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2813,6 +2893,7 @@ mod test {
                 &0,
                 &None,
                 &String::from_str(&env, "XLM"),
+                &None,
             );
         }
 
@@ -2887,6 +2968,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "USDC"),
+            &None,
         );
         client.create_bill(
             &owner,
@@ -2897,6 +2979,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
         let paid_usdc_id = client.create_bill(
             &owner,
@@ -2907,6 +2990,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "usdc"),
+            &None,
         );
         client.create_bill(
             &owner,
@@ -2917,6 +3001,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "USDC"),
+            &None,
         );
         client.create_bill(
             &owner,
@@ -2927,6 +3012,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, " usdc "),
+            &None,
         );
 
         client.pay_bill(&owner, &paid_usdc_id);
@@ -2998,6 +3084,7 @@ mod test {
             &1,    // frequency_days = 1
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill
@@ -3033,6 +3120,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill
@@ -3071,6 +3159,7 @@ mod test {
             &365,  // frequency_days = 365
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill
@@ -3113,6 +3202,7 @@ mod test {
             &30,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Warp to late payment time
@@ -3145,6 +3235,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3195,6 +3286,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3242,6 +3334,7 @@ mod test {
             &30,   // frequency_days = 30
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay the bill early (at time 500_000)
@@ -3281,6 +3374,7 @@ mod test {
             &frequency,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3318,6 +3412,7 @@ mod test {
             &30,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3354,6 +3449,7 @@ mod test {
             &30,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // Pay first bill
@@ -3395,6 +3491,7 @@ mod test {
             &freq,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         client.pay_bill(&owner, &bill_id);
@@ -3440,8 +3537,8 @@ mod test {
                     &false,
                     &0,
                     &None,
-
                     &String::from_str(&env, "XLM"),
+                    &None,
                 );
             }
 
@@ -3455,15 +3552,15 @@ mod test {
                     &false,
                     &0,
                     &None,
-
                     &String::from_str(&env, "XLM"),
+                    &None,
                 );
             }
 
             // Fast-forward to 'now' so they become overdue
             env.ledger().set_timestamp(now);
 
-            let page = client.get_overdue_bills(&owner, &0, &50);
+            let page = client.get_overdue_bills(&0, &50);
             for bill in page.items.iter() {
                 prop_assert!(bill.due_date < now, "returned bill must be past due");
             }
@@ -3494,12 +3591,12 @@ mod test {
                     &false,
                     &0,
                     &None,
-
                     &String::from_str(&env, "XLM"),
+                    &None,
                 );
             }
 
-            let page = client.get_overdue_bills(&owner, &0, &50);
+            let page = client.get_overdue_bills(&0, &50);
             prop_assert_eq!(
                 page.count,
                 0u32,
@@ -3537,8 +3634,8 @@ mod test {
                 &true,
                 &freq_days,
                 &None,
-
                 &String::from_str(&env, "XLM"),
+                &None,
             );
 
             // Fast-forward to the payment time
@@ -3595,6 +3692,7 @@ mod test {
             &0,
             &None,
             &currency,
+            &None,
         );
 
         let result_zero = client.try_create_bill(
@@ -3606,6 +3704,7 @@ mod test {
             &0,
             &None,
             &currency,
+            &None,
         );
 
         // 4. Assertions
@@ -3660,9 +3759,10 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(
             page.count, 0,
             "Bill must not appear overdue when current_time == due_date"
@@ -3690,13 +3790,14 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(page.count, 0);
 
         env.ledger().set_timestamp(due_date + 1);
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(
             page.count, 1,
             "Bill must appear overdue exactly one second past due_date"
@@ -3726,6 +3827,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // This one will be "DueNow" later
@@ -3739,12 +3841,13 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // 3. WARP to the "Present" (2,000_000)
         env.ledger().set_timestamp(2_000_000);
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
 
         // Now overdue_target (1.5M) is < current (2M) -> OVERDUE
         // due_now_target (2M) is NOT < current (2M) -> NOT OVERDUE
@@ -3774,13 +3877,14 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(page.count, 0);
 
         env.ledger().set_timestamp(due_date + day);
-        let page = client.get_overdue_bills(&owner, &0, &100);
+        let page = client.get_overdue_bills(&0, &100);
         assert_eq!(
             page.count, 1,
             "Bill must be overdue one full day past due_date"
@@ -3812,6 +3916,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
     }
 
@@ -3838,6 +3943,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // 'other' attempts to pay owner's bill
@@ -3867,6 +3973,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         // This will panic as expected because we are NOT mocking auths for this call
@@ -3894,6 +4001,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         let result = client.try_cancel_bill(&other, &bill_id);
@@ -3918,6 +4026,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         let result =
@@ -3943,6 +4052,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
         client.pay_bill(&owner, &bill_id);
 
@@ -3972,6 +4082,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
         let bob_bill = client.create_bill(
             &bob,
@@ -3982,6 +4093,7 @@ mod test {
             &0,
             &None,
             &String::from_str(&env, "XLM"),
+            &None,
         );
 
         let mut ids = Vec::new(&env);
@@ -4032,27 +4144,77 @@ mod test {
 
         // Valid chars: alphanumeric, -, _, ., :
         let valid_ref = String::from_str(&env, "ABC-123_abc.def:000");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(valid_ref), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(valid_ref),
+            &currency,
+            &None,
+        );
         assert!(res.is_ok());
 
         // Invalid char: space
         let invalid_ref = String::from_str(&env, "REF 1");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(invalid_ref), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(invalid_ref),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
 
         // Invalid char: @
         let invalid_ref2 = String::from_str(&env, "ref@123");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(invalid_ref2), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(invalid_ref2),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
 
         // Length limits
         let too_short = String::from_str(&env, "");
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(too_short), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(too_short),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
 
         let too_long_str = "a".repeat(65);
         let too_long = String::from_str(&env, &too_long_str);
-        let res = client.try_create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(too_long), &currency);
+        let res = client.try_create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(too_long),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::InvalidExternalRef)));
     }
 
@@ -4070,14 +4232,44 @@ mod test {
         let ext_ref = String::from_str(&env, "REF-001");
 
         // Owner A creates bill with REF-001
-        client.create_bill(&owner_a, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        client.create_bill(
+            &owner_a,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // Owner A tries to create ANOTHER bill with SAME ref -> Fails
-        let res = client.try_create_bill(&owner_a, &name, &200, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let res = client.try_create_bill(
+            &owner_a,
+            &name,
+            &200,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert_eq!(res, Err(Ok(BillPaymentsError::DuplicateExternalRef)));
 
         // Owner B tries to create bill with SAME ref -> Success (isolated)
-        let res_b = client.try_create_bill(&owner_b, &name, &300, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let res_b = client.try_create_bill(
+            &owner_b,
+            &name,
+            &300,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert!(res_b.is_ok());
     }
 
@@ -4093,20 +4285,50 @@ mod test {
         let currency = String::from_str(&env, "XLM");
         let ext_ref = String::from_str(&env, "REF-001");
 
-        let id1 = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // Clear ref on ID1
         client.set_external_ref(&owner, &id1, &None);
 
         // Now REF-001 is free
-        let id2 = client.create_bill(&owner, &name, &200, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id2 = client.create_bill(
+            &owner,
+            &name,
+            &200,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert!(id2 > id1);
 
         // Cancel ID2
         client.cancel_bill(&owner, &id2);
 
         // Now REF-001 is free again
-        let id3 = client.create_bill(&owner, &name, &300, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id3 = client.create_bill(
+            &owner,
+            &name,
+            &300,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         assert!(id3 > id2);
     }
 
@@ -4123,14 +4345,34 @@ mod test {
         let ext_ref = String::from_str(&env, "REF-001");
 
         // 1. Create and Pay Bill 1
-        let id1 = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let id1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
         client.pay_bill(&owner, &id1);
 
         // 2. Archive Bill 1 (frees REF-001 for active bills)
         client.archive_paid_bills(&owner, &u64::MAX);
 
         // 3. Create Bill 2 with SAME ref
-        let _id2 = client.create_bill(&owner, &name, &200, &3000000, &false, &0, &Some(ext_ref.clone()), &currency);
+        let _id2 = client.create_bill(
+            &owner,
+            &name,
+            &200,
+            &3000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // 4. Try to Restore Bill 1 -> Conflicts with Bill 2
         let res = client.try_restore_bill(&owner, &id1);
@@ -4150,7 +4392,17 @@ mod test {
         let ext_ref = String::from_str(&env, "REF-RECUR");
 
         // Create recurring bill with ref
-        let id1 = client.create_bill(&owner, &name, &100, &2000000, &true, &30, &Some(ext_ref.clone()), &currency);
+        let id1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &true,
+            &30,
+            &Some(ext_ref.clone()),
+            &currency,
+            &None,
+        );
 
         // Pay it. This creates the next instance.
         // If we cloned the ref, it would fail.
@@ -4159,7 +4411,10 @@ mod test {
         // Check the new bill
         let id2 = 2u32;
         let bill2 = client.get_bill(&id2).unwrap();
-        assert_eq!(bill2.external_ref, None, "Next recurring instance should have None ref to avoid conflict");
+        assert_eq!(
+            bill2.external_ref, None,
+            "Next recurring instance should have None ref to avoid conflict"
+        );
 
         // Now we can reuse the ref if we clear it from the old one or archive it.
         client.archive_paid_bills(&owner, &u64::MAX); // Frees the ref from id1
@@ -4168,5 +4423,401 @@ mod test {
         client.set_external_ref(&owner, &id2, &Some(ext_ref.clone()));
         let bill2_updated = client.get_bill(&id2).unwrap();
         assert_eq!(bill2_updated.external_ref, Some(ext_ref));
+    }
+
+    // ========================================================================
+    // SC-005: external_ref Authorization & Index Cleanup Tests
+    // ========================================================================
+    // These tests verify that:
+    // 1. Only the bill owner can set/clear external_ref
+    // 2. Clearing external_ref removes index entries (no stale references)
+    // 3. Cleared refs can be reused (index cleanup is complete)
+
+    #[test]
+    fn test_sc005_non_owner_cannot_set_external_ref() {
+        // Verify: Non-owner attempting to set external_ref is rejected
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+
+        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &None, &currency);
+
+        // Non-owner attempts to set external_ref
+        let result = client.try_set_external_ref(
+            &attacker,
+            &bill_id,
+            &Some(String::from_str(&env, "UNAUTHORIZED-REF")),
+        );
+        assert_eq!(result, Err(Ok(BillPaymentsError::Unauthorized)));
+
+        // Verify external_ref was not set
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, None);
+    }
+
+    #[test]
+    fn test_sc005_non_owner_cannot_clear_external_ref() {
+        // Verify: Non-owner attempting to clear external_ref is rejected
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = Some(String::from_str(&env, "OWNER-REF-001"));
+
+        // Owner creates bill with external_ref
+        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency);
+
+        // Verify external_ref is set
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, ext_ref);
+
+        // Non-owner attempts to clear external_ref
+        let result = client.try_set_external_ref(&attacker, &bill_id, &None);
+        assert_eq!(result, Err(Ok(BillPaymentsError::Unauthorized)));
+
+        // Verify external_ref was NOT cleared
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, ext_ref);
+    }
+
+    #[test]
+    fn test_sc005_owner_can_clear_external_ref() {
+        // Verify: Owner can clear external_ref successfully
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = Some(String::from_str(&env, "OWNER-REF-002"));
+
+        // Owner creates bill with external_ref
+        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency);
+
+        // Verify external_ref is set
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, ext_ref);
+
+        // Owner clears external_ref
+        let result = client.try_set_external_ref(&owner, &bill_id, &None);
+        assert_eq!(result, Ok(Ok(())));
+
+        // Verify external_ref was cleared
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, None);
+    }
+
+    #[test]
+    fn test_sc005_clearing_index_removes_entry() {
+        // Verify: Clearing external_ref removes the index entry completely
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref_str = String::from_str(&env, "INDEX-TEST-REF");
+
+        // Create bill with external_ref
+        let bill_id = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref_str.clone()),
+            &currency,
+        );
+
+        // Verify index entry exists
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, Some(ext_ref_str.clone()));
+
+        // Clear external_ref
+        client.set_external_ref(&owner, &bill_id, &None);
+
+        // Verify index entry is removed (bill no longer has ref)
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, None);
+
+        // The index should be cleaned, allowing reuse
+        // (verified in next test)
+    }
+
+    #[test]
+    fn test_sc005_cleared_ref_can_be_reused_same_bill() {
+        // Verify: Cleared external_ref can be reused on the same bill
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "REUSABLE-REF");
+
+        // Create bill with external_ref
+        let bill_id = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+        );
+
+        // Verify ref is set
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, Some(ext_ref.clone()));
+
+        // Clear the ref
+        client.set_external_ref(&owner, &bill_id, &None);
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, None);
+
+        // Reuse the same ref on the same bill - should succeed
+        let result = client.try_set_external_ref(&owner, &bill_id, &Some(ext_ref.clone()));
+        assert_eq!(result, Ok(Ok(())));
+
+        // Verify ref is set again
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, Some(ext_ref));
+    }
+
+    #[test]
+    fn test_sc005_cleared_ref_can_be_reused_different_bill() {
+        // Verify: Cleared external_ref can be reused on a different bill
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "SHARED-REF");
+
+        // Create first bill with external_ref
+        let bill_id_1 = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+        );
+
+        // Create second bill without ref
+        let bill_id_2 = client.create_bill(&owner, &name, &200, &3000000, &false, &0, &None, &currency);
+
+        // Verify ref is on bill 1
+        let bill1 = client.get_bill(&bill_id_1).unwrap();
+        assert_eq!(bill1.external_ref, Some(ext_ref.clone()));
+
+        // Attempt to set same ref on bill 2 - should fail (duplicate)
+        let result = client.try_set_external_ref(&owner, &bill_id_2, &Some(ext_ref.clone()));
+        assert_eq!(result, Err(Ok(BillPaymentsError::DuplicateExternalRef)));
+
+        // Clear ref from bill 1
+        client.set_external_ref(&owner, &bill_id_1, &None);
+        let bill1 = client.get_bill(&bill_id_1).unwrap();
+        assert_eq!(bill1.external_ref, None);
+
+        // Now setting the same ref on bill 2 should succeed
+        let result = client.try_set_external_ref(&owner, &bill_id_2, &Some(ext_ref.clone()));
+        assert_eq!(result, Ok(Ok(())));
+
+        // Verify ref is now on bill 2
+        let bill2 = client.get_bill(&bill_id_2).unwrap();
+        assert_eq!(bill2.external_ref, Some(ext_ref));
+    }
+
+    #[test]
+    fn test_sc005_no_stale_references_in_index_after_clear() {
+        // Verify: Index does not contain stale references after clearing
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "STALE-TEST-REF");
+
+        // Create, clear, and verify no stale entries
+        let bill_id = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+        );
+
+        // Clear the ref
+        client.set_external_ref(&owner, &bill_id, &None);
+
+        // Another owner tries to use the same ref - should succeed (no stale entry)
+        let other_owner = Address::generate(&env);
+        let result = client.try_create_bill(
+            &other_owner,
+            &name,
+            &150,
+            &2500000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+        );
+        assert!(result.is_ok(), "Other owner should be able to create bill with cleared ref");
+    }
+
+    #[test]
+    fn test_sc005_update_ref_without_clear() {
+        // Verify: Owner can update external_ref without explicitly clearing first
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ref_old = String::from_str(&env, "REF-OLD");
+        let ref_new = String::from_str(&env, "REF-NEW");
+
+        // Create bill with first ref
+        let bill_id = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ref_old.clone()),
+            &currency,
+        );
+
+        // Verify old ref is set
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, Some(ref_old.clone()));
+
+        // Update to new ref directly (without clearing first)
+        client.set_external_ref(&owner, &bill_id, &Some(ref_new.clone()));
+
+        // Verify new ref is set
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, Some(ref_new));
+
+        // Old ref should now be free for reuse
+        let bill_id_2 = client.create_bill(
+            &owner,
+            &name,
+            &200,
+            &3000000,
+            &false,
+            &0,
+            &Some(ref_old.clone()),
+            &currency,
+        );
+
+        // Verify old ref was successfully reused
+        let bill2 = client.get_bill(&bill_id_2).unwrap();
+        assert_eq!(bill2.external_ref, Some(ref_old));
+    }
+
+    #[test]
+    fn test_sc005_cleared_ref_survives_bill_payment() {
+        // Verify: Cleared external_ref remains cleared even after bill is paid
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = String::from_str(&env, "PAYMENT-TEST-REF");
+
+        // Create bill with external_ref
+        let bill_id = client.create_bill(
+            &owner,
+            &name,
+            &100,
+            &2000000,
+            &false,
+            &0,
+            &Some(ext_ref.clone()),
+            &currency,
+        );
+
+        // Clear the ref
+        client.set_external_ref(&owner, &bill_id, &None);
+
+        // Pay the bill
+        client.pay_bill(&owner, &bill_id);
+
+        // Verify ref is still cleared on paid bill
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, None);
+        assert!(bill.paid);
+    }
+
+    #[test]
+    fn test_sc005_authorization_covers_both_set_and_clear() {
+        // Verify: Authorization check applies to both set and clear operations
+        let env = make_env();
+        env.mock_all_auths();
+        let cid = env.register_contract(None, BillPayments);
+        let client = BillPaymentsClient::new(&env, &cid);
+        let owner = Address::generate(&env);
+        let attacker = Address::generate(&env);
+
+        let name = String::from_str(&env, "Bill");
+        let currency = String::from_str(&env, "XLM");
+        let ext_ref = Some(String::from_str(&env, "AUTH-TEST-REF"));
+
+        // Owner creates bill with external_ref
+        let bill_id = client.create_bill(&owner, &name, &100, &2000000, &false, &0, &ext_ref, &currency);
+
+        // Test: Unauthorized SET operation
+        let result_set = client.try_set_external_ref(
+            &attacker,
+            &bill_id,
+            &Some(String::from_str(&env, "ATTACKER-REF")),
+        );
+        assert_eq!(result_set, Err(Ok(BillPaymentsError::Unauthorized)));
+
+        // Test: Unauthorized CLEAR operation
+        let result_clear = client.try_set_external_ref(&attacker, &bill_id, &None);
+        assert_eq!(result_clear, Err(Ok(BillPaymentsError::Unauthorized)));
+
+        // Verify ref is unchanged
+        let bill = client.get_bill(&bill_id).unwrap();
+        assert_eq!(bill.external_ref, ext_ref);
     }
 }
