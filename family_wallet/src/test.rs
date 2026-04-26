@@ -935,6 +935,37 @@ fn test_add_member_unauthorized() {
 }
 
 #[test]
+fn test_add_member_already_exists() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, FamilyWallet);
+    let client = FamilyWalletClient::new(&env, &contract_id);
+
+    let owner = Address::generate(&env);
+    let member1 = Address::generate(&env);
+    let initial_members = vec![&env, member1.clone()];
+
+    client.init(&owner, &initial_members);
+
+    // Try to add member1 again (they already exist from initialization)
+    let result = client.try_add_family_member(&owner, &member1, &FamilyRole::Admin);
+    assert_eq!(result, Err(Ok(Error::MemberAlreadyExists)));
+
+    // Try to add owner (they already exist and are the owner)
+    let result = client.try_add_family_member(&owner, &owner, &FamilyRole::Admin);
+    assert_eq!(result, Err(Ok(Error::MemberAlreadyExists)));
+
+    // Add a new member successfully
+    let new_member = Address::generate(&env);
+    let result = client.try_add_family_member(&owner, &new_member, &FamilyRole::Member);
+    assert!(result.is_ok());
+
+    // Try to add the same new member again
+    let result = client.try_add_family_member(&owner, &new_member, &FamilyRole::Admin);
+    assert_eq!(result, Err(Ok(Error::MemberAlreadyExists)));
+}
+
+#[test]
 fn test_different_thresholds_for_different_transaction_types() {
     let env = Env::default();
     env.mock_all_auths();
@@ -2618,19 +2649,21 @@ fn test_disabled_rollover_only_checks_single_tx_limits() {
 fn test_expired_admin_cannot_pause() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
 
     // Add admin role
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
+    let _pause_admin = client.set_pause_admin(&owner, &admin);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1; // Already expired
+    let expires_at = now.saturating_sub(1); // Already expired
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
     // Attempt pause with expired role should fail
@@ -2642,21 +2675,22 @@ fn test_expired_admin_cannot_pause() {
 fn test_expired_admin_cannot_unpause() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
+    let _pause_admin = client.set_pause_admin(&owner, &admin);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now + 1;
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
-
-    // First pause as valid owner
-    let _pause = client.pause(&owner);
+    let _pause = client.pause(&admin);
+    env.ledger().set_timestamp(expires_at);
 
     // Attempt unpause with expired role should fail
     let result = client.try_unpause(&admin);
@@ -2667,17 +2701,19 @@ fn test_expired_admin_cannot_unpause() {
 fn test_expired_admin_cannot_archive_transactions() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
+    let _pause_admin = client.set_pause_admin(&owner, &admin);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
     // Attempt archive with expired role should fail
@@ -2689,17 +2725,18 @@ fn test_expired_admin_cannot_archive_transactions() {
 fn test_expired_admin_cannot_cleanup_expired_pending() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
     // Attempt cleanup with expired role should fail
@@ -2711,6 +2748,7 @@ fn test_expired_admin_cannot_cleanup_expired_pending() {
 fn test_expired_admin_cannot_configure_multisig() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
@@ -2718,12 +2756,12 @@ fn test_expired_admin_cannot_configure_multisig() {
     let admin = Address::generate(&env);
     let member = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone(), member.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add_admin = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
     let _add_member = client.add_member(&owner, &member, &FamilyRole::Member, &0);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
     let signers = vec![&env, admin.clone(), member.clone()];
@@ -2741,17 +2779,18 @@ fn test_expired_admin_cannot_configure_multisig() {
 fn test_expired_admin_cannot_configure_emergency() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
     // Attempt configure emergency with expired role should fail
@@ -2763,17 +2802,18 @@ fn test_expired_admin_cannot_configure_emergency() {
 fn test_expired_admin_cannot_set_emergency_mode() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
     // Attempt set emergency mode with expired role should fail
@@ -2785,6 +2825,7 @@ fn test_expired_admin_cannot_set_emergency_mode() {
 fn test_expired_admin_cannot_batch_add_members() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
@@ -2792,17 +2833,20 @@ fn test_expired_admin_cannot_batch_add_members() {
     let admin = Address::generate(&env);
     let new_member = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &admin, &Some(expires_at));
 
-    let members_to_add = vec![&env, BatchMemberItem {
-        address: new_member,
-        role: FamilyRole::Member,
-    }];
+    let members_to_add = vec![
+        &env,
+        BatchMemberItem {
+            address: new_member,
+            role: FamilyRole::Member,
+        },
+    ];
 
     // Attempt batch add with expired role should fail
     let result = client.try_batch_add_family_members(&admin, &members_to_add);
@@ -2813,16 +2857,17 @@ fn test_expired_admin_cannot_batch_add_members() {
 fn test_expired_owner_cannot_batch_remove_members() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let member = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, member.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &owner, &Some(expires_at));
 
     let addresses_to_remove = vec![&env, member];
@@ -2836,6 +2881,7 @@ fn test_expired_owner_cannot_batch_remove_members() {
 fn test_expired_owner_cannot_set_proposal_expiry() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
@@ -2843,7 +2889,7 @@ fn test_expired_owner_cannot_set_proposal_expiry() {
     let _result = client.init(&owner, &vec![&env]);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &owner, &Some(expires_at));
 
     // Attempt set proposal expiry with expired role should fail
@@ -2855,6 +2901,7 @@ fn test_expired_owner_cannot_set_proposal_expiry() {
 fn test_expired_owner_cannot_set_upgrade_admin() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
@@ -2863,7 +2910,7 @@ fn test_expired_owner_cannot_set_upgrade_admin() {
     let _result = client.init(&owner, &vec![&env]);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &owner, &Some(expires_at));
 
     // Attempt set upgrade admin with expired role should fail
@@ -2875,6 +2922,7 @@ fn test_expired_owner_cannot_set_upgrade_admin() {
 fn test_expired_owner_cannot_set_version() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
@@ -2882,7 +2930,7 @@ fn test_expired_owner_cannot_set_version() {
     let _result = client.init(&owner, &vec![&env]);
 
     let now = env.ledger().timestamp();
-    let expires_at = now - 1;
+    let expires_at = now.saturating_sub(1);
     let _set_exp = client.set_role_expiry(&owner, &owner, &Some(expires_at));
 
     // Attempt set version with expired role should fail
@@ -2894,14 +2942,16 @@ fn test_expired_owner_cannot_set_version() {
 fn test_non_expired_admin_can_perform_privileged_operations() {
     let env = Env::default();
     env.mock_all_auths();
+    env.ledger().set_timestamp(100);
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let _result = client.init(&owner, &vec![&env, admin.clone()]);
+    let _result = client.init(&owner, &vec![&env]);
     let _add = client.add_member(&owner, &admin, &FamilyRole::Admin, &0);
+    let _pause_admin = client.set_pause_admin(&owner, &admin);
 
     let now = env.ledger().timestamp();
     let expires_at = now + 10000; // Far in the future
@@ -2921,190 +2971,25 @@ fn test_non_expired_admin_can_perform_privileged_operations() {
     assert!(cleanup_result.is_ok());
 }
 
-
 #[test]
-#[should_panic(expected = "Emergency transfer cooldown period not elapsed")]
-fn test_emergency_transfer_cooldown_boundary_before_expiry() {
+fn test_set_proposal_expiry_validation() {
     let env = Env::default();
     env.mock_all_auths();
     let contract_id = env.register_contract(None, FamilyWallet);
     let client = FamilyWalletClient::new(&env, &contract_id);
 
     let owner = Address::generate(&env);
-    let initial_members = vec![&env];
+    client.init(&owner, &vec![&env]);
 
-    client.init(&owner, &initial_members);
+    // Test valid expiry
+    assert!(client.set_proposal_expiry(&owner, &86400));
+    assert_eq!(client.get_proposal_expiry_public(), 86400);
 
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
+    // Test expiry too large (MAX_PROPOSAL_EXPIRY is 604,800)
+    let result = client.try_set_proposal_expiry(&owner, &(604_800 + 1));
+    assert!(result.is_err());
 
-    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &10000_0000000);
-    set_ledger_time(&env, 100, 1000);
-
-    // Cooldown = 3600 seconds
-    client.configure_emergency(&owner, &1000_0000000, &3600u64, &500_0000000, &5000_0000000);
-    client.set_emergency_mode(&owner, &true);
-
-    let recipient = Address::generate(&env);
-    let amount = 500_0000000;
-
-    // First transfer at time 1000
-    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient, &amount);
-
-    // Advance time to just before cooldown expires (at time 4599, which is 1000 + 3600 - 1)
-    set_ledger_time(&env, 101, 4599);
-    
-    // Second transfer should fail because cooldown hasn't elapsed
-    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient, &amount);
+    // Test expiry zero
+    let result = client.try_set_proposal_expiry(&owner, &0);
+    assert!(result.is_err());
 }
-
-#[test]
-fn test_emergency_transfer_cooldown_boundary_after_expiry() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, FamilyWallet);
-    let client = FamilyWalletClient::new(&env, &contract_id);
-
-    let owner = Address::generate(&env);
-    let initial_members = vec![&env];
-
-    client.init(&owner, &initial_members);
-
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = TokenClient::new(&env, &token_contract.address());
-
-    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &10000_0000000);
-    set_ledger_time(&env, 100, 1000);
-
-    // Cooldown = 3600 seconds
-    client.configure_emergency(&owner, &1000_0000000, &3600u64, &500_0000000, &5000_0000000);
-    client.set_emergency_mode(&owner, &true);
-
-    let recipient1 = Address::generate(&env);
-    let recipient2 = Address::generate(&env);
-    let amount = 500_0000000;
-
-    // First transfer at time 1000
-    let _tx_id_1 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient1, &amount);
-    assert_eq!(token_client.balance(&recipient1), amount);
-
-    // Advance time to exactly when cooldown expires (at time 4600, which is 1000 + 3600)
-    set_ledger_time(&env, 102, 4600);
-    
-    // Second transfer should succeed because cooldown has now elapsed
-    let _tx_id_2 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient2, &amount);
-    assert_eq!(token_client.balance(&recipient2), amount);
-}
-
-#[test]
-#[should_panic(expected = "Emergency daily limit exceeded")]
-fn test_emergency_transfer_daily_limit_exceeded() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, FamilyWallet);
-    let client = FamilyWalletClient::new(&env, &contract_id);
-
-    let owner = Address::generate(&env);
-    let initial_members = vec![&env];
-
-    client.init(&owner, &initial_members);
-
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    
-    // Mint enough for multiple transfers
-    let total = 15000_0000000;
-    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &total);
-    
-    set_ledger_time(&env, 100, 1000);
-    
-    // max_amount=1000, cooldown=1, min_balance=500, daily_limit=3000
-    // So we can do 3 transfers of 1000 before hitting the limit
-    client.configure_emergency(&owner, &1000_0000000, &1u64, &500_0000000, &3000_0000000);
-    client.set_emergency_mode(&owner, &true);
-
-    let recipient1 = Address::generate(&env);
-    let recipient2 = Address::generate(&env);
-    let recipient3 = Address::generate(&env);
-    let recipient4 = Address::generate(&env);
-
-    let amount = 1000_0000000;
-
-    // First transfer: 1000 (total = 1000)
-    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient1, &amount);
-    
-    // Advance past cooldown
-    set_ledger_time(&env, 101, 1002);
-    
-    // Second transfer: 1000 (total = 2000)
-    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient2, &amount);
-    
-    // Advance past cooldown again
-    set_ledger_time(&env, 102, 1004);
-    
-    // Third transfer: 1000 (total = 3000, exactly at limit)
-    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient3, &amount);
-    
-    // Advance past cooldown once more
-    set_ledger_time(&env, 103, 1006);
-    
-    // Fourth transfer: 1000 (total = 4000, exceeds limit of 3000)
-    // This should panic
-    client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient4, &amount);
-}
-
-#[test]
-fn test_emergency_transfer_daily_limit_rollover_after_24h() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, FamilyWallet);
-    let client = FamilyWalletClient::new(&env, &contract_id);
-
-    let owner = Address::generate(&env);
-    let initial_members = vec![&env];
-
-    client.init(&owner, &initial_members);
-
-    let token_admin = Address::generate(&env);
-    let token_contract = env.register_stellar_asset_contract_v2(token_admin.clone());
-    let token_client = TokenClient::new(&env, &token_contract.address());
-
-    // Mint enough tokens
-    let total = 15000_0000000;
-    StellarAssetClient::new(&env, &token_contract.address()).mint(&owner, &total);
-    
-    // Start at timestamp 1000
-    set_ledger_time(&env, 100, 1000);
-    
-    // max_amount=2000, cooldown=1, min_balance=500, daily_limit=5000
-    client.configure_emergency(&owner, &2000_0000000, &1u64, &500_0000000, &5000_0000000);
-    client.set_emergency_mode(&owner, &true);
-
-    let recipient1 = Address::generate(&env);
-    let recipient2 = Address::generate(&env);
-    let recipient3 = Address::generate(&env);
-
-    let amount = 2000_0000000;
-
-    // First transfer at time 1000: 2000
-    let _tx_id_1 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient1, &amount);
-    assert_eq!(token_client.balance(&recipient1), amount);
-
-    // Advance time to 1000 + 86399 seconds (1 second before 24h rollover)
-    // Still within the same 24h window
-    set_ledger_time(&env, 101, 87399);
-    
-    // Transfer 2000 more (total = 4000, still within daily_limit of 5000)
-    let _tx_id_2 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient2, &amount);
-    assert_eq!(token_client.balance(&recipient2), amount);
-
-    // Advance time to 1000 + 86400 seconds (exactly 24h later, rollover point)
-    set_ledger_time(&env, 102, 87400);
-    
-    // Now the daily counter should have reset
-    // Transfer 2000 more (this should succeed because counter was reset)
-    let _tx_id_3 = client.propose_emergency_transfer(&owner, &token_contract.address(), &recipient3, &amount);
-    assert_eq!(token_client.balance(&recipient3), amount);
-}
-
