@@ -644,6 +644,7 @@ impl FamilyWallet {
             .instance()
             .set(&Self::get_config_key(tx_type), &config);
 
+        Self::append_access_audit(&env, symbol_short!("ms_conf"), &caller, None, true);
         Ok(true)
     }
 
@@ -1287,8 +1288,10 @@ impl FamilyWallet {
             EventCategory::System,
             EventPriority::Low,
             symbol_short!("archived"),
-            (archived_count, caller),
+            (archived_count, caller.clone()),
         );
+
+        Self::append_access_audit(&env, symbol_short!("arch_tx"), &caller, None, true);
 
         archived_count
     }
@@ -1378,8 +1381,9 @@ impl FamilyWallet {
             EventCategory::System,
             EventPriority::Low,
             symbol_short!("exp_cln"),
-            (removed_count, caller),
+            (removed_count, caller.clone()),
         );
+        Self::append_access_audit(&env, symbol_short!("cln_exp"), &caller, None, true);
         removed_count
     }
 
@@ -1493,12 +1497,13 @@ impl FamilyWallet {
                 .instance()
                 .get(&symbol_short!("SPND_TRK"))
                 .unwrap_or_else(|| Map::new(&env));
-            trackers.remove(member);
+            trackers.remove(member.clone());
             env.storage()
                 .instance()
                 .set(&symbol_short!("SPND_TRK"), &trackers);
         }
 
+        Self::append_access_audit(&env, symbol_short!("prec_lim"), &caller, Some(member), true);
         Ok(true)
     }
 
@@ -1551,6 +1556,7 @@ impl FamilyWallet {
                 .unwrap_or_else(|| panic!("Wallet not initialized"))
         });
         if admin != caller {
+            Self::append_access_audit(&env, symbol_short!("pause"), &caller, None, false);
             panic!("Only pause admin can pause");
         }
         env.storage()
@@ -1558,6 +1564,7 @@ impl FamilyWallet {
             .set(&symbol_short!("PAUSED"), &true);
         env.events()
             .publish((symbol_short!("wallet"), symbol_short!("paused")), ());
+        Self::append_access_audit(&env, symbol_short!("pause"), &caller, None, true);
         true
     }
 
@@ -1570,9 +1577,11 @@ impl FamilyWallet {
                 .unwrap_or_else(|| panic!("Wallet not initialized"))
         });
         if admin != caller {
+            Self::append_access_audit(&env, symbol_short!("unpause"), &caller, None, false);
             panic!("Only pause admin can unpause");
         }
         if Self::role_has_expired(&env, &caller) {
+            Self::append_access_audit(&env, symbol_short!("unpause"), &caller, None, false);
             panic!("Role has expired");
         }
         env.storage()
@@ -1580,6 +1589,7 @@ impl FamilyWallet {
             .set(&symbol_short!("PAUSED"), &false);
         env.events()
             .publish((symbol_short!("wallet"), symbol_short!("unpaused")), ());
+        Self::append_access_audit(&env, symbol_short!("unpause"), &caller, None, true);
         true
     }
 
@@ -1589,6 +1599,7 @@ impl FamilyWallet {
         env.storage()
             .instance()
             .set(&symbol_short!("PAUSE_ADM"), &new_admin);
+        Self::append_access_audit(&env, symbol_short!("ps_adm"), &caller, Some(new_admin), true);
         true
     }
 
@@ -1630,6 +1641,7 @@ impl FamilyWallet {
         env.storage()
             .instance()
             .set(&symbol_short!("PROP_EXP"), &expiry);
+        Self::append_access_audit(&env, symbol_short!("prop_exp"), &caller, None, true);
         true
     }
 
@@ -1813,6 +1825,8 @@ impl FamilyWallet {
             (current_upgrade_admin.clone(), new_admin.clone()),
         );
 
+        Self::append_access_audit(&env, symbol_short!("upg_adm"), &caller, Some(new_admin), true);
+
         true
     }
 
@@ -1847,6 +1861,7 @@ impl FamilyWallet {
             (symbol_short!("wallet"), symbol_short!("upgraded")),
             (prev, new_version),
         );
+        Self::append_access_audit(&env, symbol_short!("set_ver"), &caller, None, true);
         true
     }
 
