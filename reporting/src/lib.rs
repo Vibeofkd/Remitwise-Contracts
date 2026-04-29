@@ -1824,5 +1824,9 @@ impl ReportingContract {
 
 #[cfg(test)]
 mod events_schema_test;
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_auth_acl;
